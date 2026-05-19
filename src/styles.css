@@ -241,6 +241,10 @@ textarea {
   cursor: grabbing;
 }
 
+#mapCanvas .ol-viewport {
+  background: transparent;
+}
+
 .map-controls {
   position: absolute;
   right: 18px;
@@ -338,6 +342,10 @@ textarea {
   border-radius: 7px;
   object-fit: cover;
   background: #d9ddd8;
+}
+
+.color-thumb {
+  display: block;
 }
 
 .record-card strong,

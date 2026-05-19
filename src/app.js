@@ -1,20 +1,23 @@
+import "ol/ol.css";
+import Feature from "ol/Feature";
+import OlMap from "ol/Map";
+import View from "ol/View";
+import Point from "ol/geom/Point";
+import VectorLayer from "ol/layer/Vector";
+import VectorSource from "ol/source/Vector";
+import { Circle as CircleStyle, Fill, Stroke, Style, Text } from "ol/style";
+import { boundingExtent } from "ol/extent";
+
 const state = {
+  dataset: null,
   records: [],
   fields: [],
-  groupField: "",
-  titleField: "",
-  detailField: "",
-  imageField: "",
   clusters: [],
-  filteredRecords: [],
   selected: null,
   mode: "map",
-  search: "",
-  view: { x: 0, y: 0, scale: 1 },
-  dragging: false,
-  lastPointer: null,
-  pointerStart: null,
-  pointIndex: [],
+  map: null,
+  source: null,
+  layer: null,
 };
 
 const palette = [
@@ -28,14 +31,15 @@ const palette = [
   "#2f8b72",
   "#a34848",
   "#5d6b73",
+  "#5b5f68",
+  "#c46f7e",
 ];
 
 const els = {
-  canvas: document.querySelector("#mapCanvas"),
+  map: document.querySelector("#mapCanvas"),
   mapShell: document.querySelector("#mapShell"),
   listShell: document.querySelector("#listShell"),
   listContent: document.querySelector("#listContent"),
-  datasetDescription: document.querySelector("#datasetDescription"),
   stats: document.querySelector("#stats"),
   legend: document.querySelector("#legend"),
   details: document.querySelector("#details"),
@@ -48,11 +52,9 @@ const els = {
   zoomOutButton: document.querySelector("#zoomOutButton"),
 };
 
-const ctx = els.canvas.getContext("2d");
-
 async function loadDataset() {
   try {
-    const response = await fetch("./sample-data/restaurants.json");
+    const response = await fetch("./sample-data/cars.processed.json");
     if (!response.ok)
       throw new Error(`Could not load dataset: ${response.status}`);
     const dataset = await response.json();
@@ -63,80 +65,36 @@ async function loadDataset() {
 }
 
 function loadRecords(dataset) {
-  const records = Array.isArray(dataset) ? dataset : dataset.records;
-  const preferred = Array.isArray(dataset)
-    ? {}
-    : {
-        groupField: dataset.groupingField,
-        titleField: dataset.titleField,
-        detailField: dataset.detailField,
-        imageField: dataset.imageField,
-      };
-
+  const records = dataset.records;
   if (!Array.isArray(records)) {
     throw new Error("Dataset JSON must include a records array.");
   }
 
-  state.datasetName = dataset.name || "Data Atlas";
-  state.datasetDescription =
-    dataset.description || "Cluster a JSON dataset by its configured field.";
+  state.dataset = dataset;
   state.records = records.map((record, index) => ({
     ...record,
     __index: index,
   }));
   state.fields = collectFields(state.records);
-  state.groupField = pickField(preferred.groupField, [
-    "groupBy",
-    "group",
-    "category",
-    "genre",
-    "cuisine",
-    "location",
-    "neighborhood",
-    "rating",
-  ]);
-  state.titleField = pickField(preferred.titleField, [
-    "title",
-    "name",
-    "label",
-    "restaurant",
-    "book",
-  ]);
-  state.detailField = pickField(preferred.detailField, [
-    "description",
-    "reviewTone",
-    "summary",
-    "reviews",
-    "author",
-    "bestFor",
-  ]);
-  state.imageField = pickField(preferred.imageField, [
-    "image",
-    "imageUrl",
-    "cover",
-    "photo",
-    "thumbnail",
-  ]);
-  state.search = "";
-  if (els.datasetDescription)
-    els.datasetDescription.textContent = state.datasetDescription;
-  compute();
+  state.clusters = buildClusters(state.records);
+
+  renderChrome();
+  renderLegend();
+  renderList();
+  renderDetails();
+  renderMap();
 }
 
 function showLoadError(error) {
   els.viewTitle.textContent = "Dataset could not load";
   els.viewSubtitle.textContent = error.message;
-  if (els.datasetDescription) {
-    els.datasetDescription.textContent =
-      "Open this app through the local server so it can read the JSON file.";
-  }
   els.stats.innerHTML = "";
   els.legend.innerHTML = "";
   els.emptyState.classList.remove("hidden");
   els.details.classList.add("hidden");
   els.emptyState.innerHTML = `
-    <span>JSON file blocked by browser security</span>
-    <p>Use http://localhost:4173 instead of opening index.html directly, so the app can load sample-data/movies.json.</p>
+    <span>Processed JSON is missing</span>
+    <p>Run npm run process:data, then reload http://localhost:4173.</p>
   `;
 }
 
@@ -150,106 +108,42 @@ function collectFields(records) {
   return [...fields].sort((a, b) => a.localeCompare(b));
 }
 
-function pickField(preferred, candidates) {
-  if (preferred && state.fields.includes(preferred)) return preferred;
-  const lowerMap = new Map(
-    state.fields.map((field) => [field.toLowerCase(), field]),
-  );
-  for (const candidate of candidates) {
-    const exact = lowerMap.get(candidate.toLowerCase());
-    if (exact) return exact;
-  }
-  return state.fields[0] || "";
-}
-
-function compute() {
-  state.filteredRecords = filterRecords(state.records);
-  state.clusters = buildClusters(state.filteredRecords, state.groupField);
-  positionClusters(state.clusters);
-  fitViewToClusters();
-  state.selected = null;
-  render();
-}
-
-function filterRecords(records) {
-  const query = state.search.trim().toLowerCase();
-  if (!query) return [...records];
-  return records.filter((record) =>
-    Object.values(record).some((value) =>
-      String(value ?? "")
-        .toLowerCase()
-        .includes(query),
-    ),
-  );
-}
-
-function buildClusters(records, field) {
+function buildClusters(records) {
   const grouped = new Map();
   records.forEach((record) => {
-    const value = normalizeGroupValue(record[field]);
-    if (!grouped.has(value)) grouped.set(value, []);
-    grouped.get(value).push(record);
+    const id = String(record.clusterId ?? "unknown");
+    if (!grouped.has(id)) grouped.set(id, []);
+    grouped.get(id).push(record);
   });
 
-  return [...grouped.entries()]
+  const clusters = [...grouped.entries()]
     .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
-    .map(([name, items], index) => ({
-      id: slugify(name),
-      name,
+    .map(([id, items], index) => ({
+      id,
+      name: items[0]?.clusterLabel || `Cluster ${id}`,
       items,
-      color: palette[index % palette.length],
-      x: 0,
-      y: 0,
-      radius: 90,
+      color: id === "-1" ? "#767b81" : palette[index % palette.length],
     }));
+  const nameCounts = clusters.reduce((counts, cluster) => {
+    counts.set(cluster.name, (counts.get(cluster.name) || 0) + 1);
+    return counts;
+  }, new Map());
+  return clusters.map((cluster) => ({
+    ...cluster,
+    name:
+      nameCounts.get(cluster.name) > 1
+        ? `${cluster.name} ${cluster.id}`
+        : cluster.name,
+  }));
 }
 
-function normalizeGroupValue(value) {
-  if (Array.isArray(value)) return value.join(", ");
-  if (value === undefined || value === null || value === "") return "Unknown";
-  return String(value);
-}
-
-function positionClusters(clusters) {
-  const total = clusters.length || 1;
-  clusters.forEach((cluster) => {
-    cluster.radius = Math.max(82, Math.sqrt(cluster.items.length) * 38 + 34);
-  });
-
-  const maxRadius = Math.max(...clusters.map((cluster) => cluster.radius), 82);
-  const ringRadius = Math.max(360, total * 54, maxRadius * 2.2);
-  clusters.forEach((cluster, clusterIndex) => {
-    const angle = -Math.PI / 2 + (Math.PI * 2 * clusterIndex) / total;
-    cluster.x = Math.cos(angle) * ringRadius;
-    cluster.y = Math.sin(angle) * ringRadius;
-
-    cluster.items.forEach((item, itemIndex) => {
-      const itemAngle = Math.PI * 2 * itemIndex * 0.61803398875;
-      const itemRadius = Math.sqrt(itemIndex + 1) * 23;
-      item.__x =
-        cluster.x +
-        Math.cos(itemAngle) * Math.min(itemRadius, cluster.radius - 26);
-      item.__y =
-        cluster.y +
-        Math.sin(itemAngle) * Math.min(itemRadius, cluster.radius - 26);
-      item.__cluster = cluster;
-    });
-  });
-}
-
-function render() {
-  els.viewTitle.textContent =
-    state.datasetName || `${humanize(state.groupField)} clusters`;
-  els.viewSubtitle.textContent = `${state.filteredRecords.length} visible records grouped from the ${state.groupField} field.`;
+function renderChrome() {
+  const layout = state.dataset.layout;
+  els.viewTitle.textContent = state.dataset.name || "Data Atlas";
   els.stats.innerHTML = `
-    <div class="stat"><strong>${state.filteredRecords.length}</strong><span>Records</span></div>
-    <div class="stat"><strong>${state.clusters.length}</strong><span>Groups</span></div>
+    <div class="stat"><strong>${state.records.length}</strong><span>Records</span></div>
+    <div class="stat"><strong>${state.clusters.length}</strong><span>Clusters</span></div>
   `;
-
-  renderLegend();
-  renderList();
-  renderDetails();
-  drawMap();
 }
 
 function renderLegend() {
@@ -284,15 +178,12 @@ function renderList() {
 }
 
 function renderRecordCard(record) {
-  const title = getValue(record, state.titleField);
-  const detail = getValue(record, state.detailField);
-  const image = getValue(record, state.imageField);
   return `
     <button class="record-card" type="button" data-record="${record.__index}">
-      ${image ? `<img class="thumb" src="${escapeAttr(image)}" alt="">` : `<span class="thumb"></span>`}
+      <span class="thumb color-thumb" style="background:${clusterForRecord(record)?.color || "#d9ddd8"}"></span>
       <span>
-        <strong>${escapeHtml(title)}</strong>
-        <span>${escapeHtml(detail)}</span>
+        <strong>${escapeHtml(record[state.dataset.titleField])}</strong>
+        <span>${escapeHtml(record[state.dataset.detailField])}</span>
       </span>
     </button>
   `;
@@ -313,24 +204,14 @@ function renderDetails() {
     const cluster = state.selected.value;
     els.details.innerHTML = `
       <div>
-        <p class="detail-meta">Cluster</p>
+        <p class="detail-meta">HDBSCAN cluster</p>
         <h2>${escapeHtml(cluster.name)}</h2>
-        <p class="record-detail">${cluster.items.length} records grouped by ${escapeHtml(state.groupField)}.</p>
+        <p class="record-detail">${cluster.items.length} nearby records in PaCMAP space.</p>
       </div>
       <div class="field-table">
         ${cluster.items
-          .slice(0, 10)
-          .map(
-            (record) => `
-          <button class="record-card" type="button" data-record="${record.__index}">
-            ${getValue(record, state.imageField) ? `<img class="thumb" src="${escapeAttr(getValue(record, state.imageField))}" alt="">` : `<span class="thumb"></span>`}
-            <span>
-              <strong>${escapeHtml(getValue(record, state.titleField))}</strong>
-              <span>${escapeHtml(getValue(record, state.detailField))}</span>
-            </span>
-          </button>
-        `,
-          )
+          .slice(0, 12)
+          .map((record) => renderRecordCard(record))
           .join("")}
       </div>
     `;
@@ -338,13 +219,11 @@ function renderDetails() {
   }
 
   const record = state.selected.value;
-  const image = getValue(record, state.imageField);
   els.details.innerHTML = `
-    ${image ? `<img src="${escapeAttr(image)}" alt="">` : ""}
     <div>
-      <p class="detail-meta">${escapeHtml(normalizeGroupValue(record[state.groupField]))}</p>
-      <h2>${escapeHtml(getValue(record, state.titleField))}</h2>
-      <p class="record-detail">${escapeHtml(getValue(record, state.detailField))}</p>
+      <p class="detail-meta">${escapeHtml(record.clusterLabel)} · ${escapeHtml(record.groupValue)}</p>
+      <h2>${escapeHtml(record[state.dataset.titleField])}</h2>
+      <p class="record-detail">${escapeHtml(record[state.dataset.detailField])}</p>
     </div>
     <div class="field-table">
       ${state.fields
@@ -361,186 +240,92 @@ function renderDetails() {
   `;
 }
 
-function drawMap() {
-  const rect = els.canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(1, Math.floor(rect.width * dpr));
-  const height = Math.max(1, Math.floor(rect.height * dpr));
-  if (els.canvas.width !== width || els.canvas.height !== height) {
-    els.canvas.width = width;
-    els.canvas.height = height;
-  }
-
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, rect.width, rect.height);
-  ctx.save();
-  ctx.translate(rect.width / 2 + state.view.x, rect.height / 2 + state.view.y);
-  ctx.scale(state.view.scale, state.view.scale);
-
-  state.pointIndex = [];
-  drawGrid(rect.width, rect.height);
-
-  state.clusters.forEach((cluster) => drawCluster(cluster));
-  state.clusters.forEach((cluster) =>
-    cluster.items.forEach((item) => drawPoint(item, cluster)),
-  );
-
-  ctx.restore();
-}
-
-function drawGrid(width, height) {
-  const extent = Math.max(width, height) / state.view.scale;
-  ctx.strokeStyle = "rgba(31, 37, 40, 0.055)";
-  ctx.lineWidth = 1 / state.view.scale;
-  for (let x = -extent; x <= extent; x += 80) {
-    ctx.beginPath();
-    ctx.moveTo(x, -extent);
-    ctx.lineTo(x, extent);
-    ctx.stroke();
-  }
-  for (let y = -extent; y <= extent; y += 80) {
-    ctx.beginPath();
-    ctx.moveTo(-extent, y);
-    ctx.lineTo(extent, y);
-    ctx.stroke();
-  }
-}
-
-function drawCluster(cluster) {
-  ctx.beginPath();
-  ctx.arc(cluster.x, cluster.y, cluster.radius, 0, Math.PI * 2);
-  ctx.fillStyle = hexToRgba(cluster.color, 0.1);
-  ctx.fill();
-  ctx.strokeStyle = hexToRgba(cluster.color, 0.34);
-  ctx.lineWidth = 1.3 / state.view.scale;
-  ctx.stroke();
-
-  ctx.fillStyle = "#1f2528";
-  ctx.font = `${Math.max(15, 18 / state.view.scale)}px Inter, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(cluster.name, cluster.x, cluster.y - cluster.radius - 20);
-  ctx.fillStyle = "#6d7377";
-  ctx.font = `${Math.max(11, 12 / state.view.scale)}px Inter, sans-serif`;
-  ctx.fillText(
-    `${cluster.items.length} records`,
-    cluster.x,
-    cluster.y - cluster.radius - 2,
-  );
-}
-
-function drawPoint(item, cluster) {
-  const radius =
-    state.selected?.type === "record" &&
-    state.selected.value.__index === item.__index
-      ? 11
-      : 7;
-  ctx.beginPath();
-  ctx.arc(item.__x, item.__y, radius, 0, Math.PI * 2);
-  ctx.fillStyle = cluster.color;
-  ctx.fill();
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = 2 / state.view.scale;
-  ctx.stroke();
-
-  if (state.view.scale > 0.85) {
-    ctx.fillStyle = "rgba(31, 37, 40, 0.78)";
-    ctx.font = `${11 / state.view.scale}px Inter, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    ctx.fillText(
-      truncate(getValue(item, state.titleField), 18),
-      item.__x,
-      item.__y + 13,
-    );
-  }
-
-  state.pointIndex.push({
-    x: item.__x,
-    y: item.__y,
-    radius: 16,
-    item,
-    cluster,
-  });
-}
-
-function canvasToWorld(event) {
-  const rect = els.canvas.getBoundingClientRect();
-  return {
-    x:
-      (event.clientX - rect.left - rect.width / 2 - state.view.x) /
-      state.view.scale,
-    y:
-      (event.clientY - rect.top - rect.height / 2 - state.view.y) /
-      state.view.scale,
-  };
-}
-
-function selectAt(event) {
-  const point = canvasToWorld(event);
-  const hit = [...state.pointIndex].reverse().find((entry) => {
-    const dx = entry.x - point.x;
-    const dy = entry.y - point.y;
-    return Math.sqrt(dx * dx + dy * dy) <= entry.radius / state.view.scale + 4;
+function renderMap() {
+  const features = state.records.map((record) => {
+    const feature = new Feature({
+      geometry: new Point([record.x, record.y]),
+      record,
+      cluster: clusterForRecord(record),
+    });
+    feature.setId(record.__index);
+    return feature;
   });
 
-  if (hit) {
-    state.selected = { type: "record", value: hit.item };
-    renderDetails();
-    drawMap();
-    return;
-  }
-
-  const cluster = state.clusters.find((entry) => {
-    const dx = entry.x - point.x;
-    const dy = entry.y - point.y;
-    return Math.sqrt(dx * dx + dy * dy) <= entry.radius;
+  state.source = new VectorSource({ features });
+  state.layer = new VectorLayer({
+    source: state.source,
+    style: styleFeature,
   });
 
-  if (cluster) {
-    state.selected = { type: "cluster", value: cluster };
-    renderDetails();
-    drawMap();
-  }
-}
-
-function zoomBy(factor) {
-  state.view.scale = clamp(state.view.scale * factor, 0.35, 3.2);
-  drawMap();
-}
-
-function resetView() {
-  state.view = { x: 0, y: 0, scale: 1 };
-}
-
-function fitViewToClusters() {
-  const rect = els.canvas.getBoundingClientRect();
-  if (!state.clusters.length || !rect.width || !rect.height) {
-    resetView();
-    return;
-  }
-
-  const padding = 150;
-  const bounds = state.clusters.reduce(
-    (acc, cluster) => ({
-      minX: Math.min(acc.minX, cluster.x - cluster.radius - padding),
-      maxX: Math.max(acc.maxX, cluster.x + cluster.radius + padding),
-      minY: Math.min(acc.minY, cluster.y - cluster.radius - padding),
-      maxY: Math.max(acc.maxY, cluster.y + cluster.radius + padding),
+  state.map = new OlMap({
+    target: els.map,
+    layers: [state.layer],
+    view: new View({
+      center: [0, 0],
+      zoom: 12,
+      minZoom: 8,
+      maxZoom: 18,
     }),
-    { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity },
-  );
+    controls: [],
+  });
 
-  const width = bounds.maxX - bounds.minX;
-  const height = bounds.maxY - bounds.minY;
-  const scale = clamp(
-    Math.min(rect.width / width, rect.height / height),
-    0.35,
-    1.2,
+  state.map.on("click", (event) => {
+    const feature = state.map.forEachFeatureAtPixel(
+      event.pixel,
+      (candidate) => candidate,
+    );
+    if (!feature) return;
+    state.selected = { type: "record", value: feature.get("record") };
+    renderDetails();
+    state.layer.changed();
+  });
+
+  state.map.getView().on("change:resolution", () => state.layer.changed());
+
+  fitMap();
+}
+
+function styleFeature(feature) {
+  const record = feature.get("record");
+  const cluster = feature.get("cluster");
+  const selected =
+    state.selected?.type === "record" &&
+    state.selected.value.__index === record.__index;
+  const zoom = state.map?.getView().getZoom() || 12;
+  const showLabel = zoom >= 14 || selected;
+
+  return new Style({
+    image: new CircleStyle({
+      radius: selected ? 8 : 5,
+      fill: new Fill({ color: cluster?.color || "#767b81" }),
+      stroke: new Stroke({ color: "#ffffff", width: selected ? 3 : 1.5 }),
+    }),
+    text: showLabel
+      ? new Text({
+          text: truncate(String(record[state.dataset.titleField] || ""), 18),
+          offsetY: 15,
+          font: "12px Inter, sans-serif",
+          fill: new Fill({ color: "#1f2528" }),
+          stroke: new Stroke({ color: "rgba(255,255,255,0.85)", width: 3 }),
+        })
+      : undefined,
+  });
+}
+
+function fitMap(cluster) {
+  const records = cluster?.items || state.records;
+  const extent = boundingExtent(records.map((record) => [record.x, record.y]));
+  state.map.getView().fit(extent, {
+    padding: [80, 80, 80, 80],
+    duration: 280,
+    maxZoom: cluster ? 16 : 13,
+  });
+}
+
+function clusterForRecord(record) {
+  return state.clusters.find(
+    (cluster) => cluster.id === String(record.clusterId),
   );
-  const centerX = (bounds.minX + bounds.maxX) / 2;
-  const centerY = (bounds.minY + bounds.maxY) / 2;
-  state.view = { x: -centerX * scale, y: -centerY * scale, scale };
 }
 
 function setMode(mode) {
@@ -548,12 +333,12 @@ function setMode(mode) {
   els.mapShell.classList.toggle("hidden", mode !== "map");
   els.listShell.classList.toggle("hidden", mode !== "list");
   els.viewToggleButton.textContent = mode === "map" ? "List" : "Map";
-  if (mode === "map") requestAnimationFrame(drawMap);
-}
-
-function getValue(record, field) {
-  if (!field) return "";
-  return formatValue(record[field]);
+  if (mode === "map") {
+    requestAnimationFrame(() => {
+      state.map.updateSize();
+      fitMap();
+    });
+  }
 }
 
 function formatValue(value) {
@@ -563,37 +348,9 @@ function formatValue(value) {
   return String(value);
 }
 
-function humanize(value) {
-  return String(value || "Field")
-    .replace(/[_-]/g, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
 function truncate(value, length) {
   const text = String(value || "");
   return text.length > length ? `${text.slice(0, length - 1)}...` : text;
-}
-
-function slugify(value) {
-  return (
-    String(value)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "") || "unknown"
-  );
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function hexToRgba(hex, alpha) {
-  const value = hex.replace("#", "");
-  const r = parseInt(value.slice(0, 2), 16);
-  const g = parseInt(value.slice(2, 4), 16);
-  const b = parseInt(value.slice(4, 6), 16);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 function escapeHtml(value) {
@@ -605,14 +362,16 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function escapeAttr(value) {
-  return escapeHtml(value);
-}
-
 els.viewToggleButton.addEventListener("click", () => setMode("list"));
 els.mapModeButton.addEventListener("click", () => setMode("map"));
-els.zoomInButton.addEventListener("click", () => zoomBy(1.18));
-els.zoomOutButton.addEventListener("click", () => zoomBy(0.84));
+els.zoomInButton.addEventListener("click", () => {
+  const view = state.map.getView();
+  view.animate({ zoom: view.getZoom() + 1, duration: 180 });
+});
+els.zoomOutButton.addEventListener("click", () => {
+  const view = state.map.getView();
+  view.animate({ zoom: view.getZoom() - 1, duration: 180 });
+});
 
 els.legend.addEventListener("click", (event) => {
   const button = event.target.closest("[data-cluster]");
@@ -622,10 +381,9 @@ els.legend.addEventListener("click", (event) => {
   );
   if (!cluster) return;
   state.selected = { type: "cluster", value: cluster };
-  state.view.x = -cluster.x * state.view.scale;
-  state.view.y = -cluster.y * state.view.scale;
   renderDetails();
-  drawMap();
+  state.layer.changed();
+  fitMap(cluster);
 });
 
 document.addEventListener("click", (event) => {
@@ -637,44 +395,12 @@ document.addEventListener("click", (event) => {
   if (!record) return;
   state.selected = { type: "record", value: record };
   renderDetails();
-  drawMap();
+  state.layer.changed();
+  if (state.mode === "map") {
+    state.map
+      .getView()
+      .animate({ center: [record.x, record.y], zoom: 16, duration: 260 });
+  }
 });
-
-els.canvas.addEventListener("pointerdown", (event) => {
-  state.dragging = true;
-  state.lastPointer = { x: event.clientX, y: event.clientY };
-  state.pointerStart = { x: event.clientX, y: event.clientY };
-  els.canvas.setPointerCapture(event.pointerId);
-});
-
-els.canvas.addEventListener("pointermove", (event) => {
-  if (!state.dragging || !state.lastPointer) return;
-  state.view.x += event.clientX - state.lastPointer.x;
-  state.view.y += event.clientY - state.lastPointer.y;
-  state.lastPointer = { x: event.clientX, y: event.clientY };
-  drawMap();
-});
-
-els.canvas.addEventListener("pointerup", (event) => {
-  const moved = state.pointerStart
-    ? Math.abs(event.clientX - state.pointerStart.x) +
-      Math.abs(event.clientY - state.pointerStart.y)
-    : 0;
-  state.dragging = false;
-  state.lastPointer = null;
-  state.pointerStart = null;
-  if (moved < 3) selectAt(event);
-});
-
-els.canvas.addEventListener(
-  "wheel",
-  (event) => {
-    event.preventDefault();
-    zoomBy(event.deltaY > 0 ? 0.92 : 1.08);
-  },
-  { passive: false },
-);
-
-window.addEventListener("resize", drawMap);
 
 loadDataset();
