@@ -6,7 +6,6 @@ from pathlib import Path
 import hdbscan
 import numpy as np
 import pacmap
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
 
 
@@ -31,14 +30,42 @@ def cluster_label(records, label, grouping_field):
     if label == -1:
         return "Outliers"
     if records and "cylinders" in records[0]:
-        origins = [str(record.get(grouping_field, "Unknown")) for record in records]
-        cylinders = [str(record.get("cylinders", "Unknown")) for record in records]
-        origin, _ = Counter(origins).most_common(1)[0]
-        cylinder, _ = Counter(cylinders).most_common(1)[0]
-        return f"{origin} · {cylinder} cyl"
+        cylinders = average(records, "cylinders")
+        mpg = average(records, "milesPerGallon")
+        weight = average(records, "weightInLbs")
+        year = average(records, "year")
+
+        if cylinders >= 7 and mpg < 18:
+            return "Heavy V8s"
+        if cylinders >= 7:
+            return "V8 cruisers"
+        if cylinders >= 5.5:
+            return "Midweight 6-cyl"
+        if mpg >= 28 and year >= 1976:
+            return "Later economy"
+        if mpg >= 26:
+            return "Efficient 4-cyl"
+        if weight <= 2400:
+            return "Light 4-cyl"
+        return "Classic 4-cyl"
     values = [str(record.get(grouping_field, "Unknown")) for record in records]
     name, _ = Counter(values).most_common(1)[0]
     return name
+
+
+def average(records, field):
+    values = []
+    for record in records:
+        value = record.get(field)
+        if value is None or value == "":
+            continue
+        try:
+            values.append(float(value))
+        except ValueError:
+            continue
+    if not values:
+        return 0
+    return sum(values) / len(values)
 
 
 def main():
@@ -59,10 +86,7 @@ def main():
     )
     numeric_fields = dataset.get("numericFields", [])
 
-    corpus = [text_for_record(record, feature_fields) for record in records]
-    text_matrix = TfidfVectorizer(max_features=512, stop_words="english").fit_transform(corpus)
-    text_features = np.asarray(text_matrix.toarray(), dtype=float)  # type: ignore[attr-defined]
-    feature_parts = [text_features]
+    feature_parts = []
 
     if numeric_fields:
         numeric = np.array(
@@ -74,12 +98,23 @@ def main():
         )
         feature_parts.append(StandardScaler().fit_transform(numeric))
 
+    if feature_fields:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        corpus = [text_for_record(record, feature_fields) for record in records]
+        text_matrix = TfidfVectorizer(max_features=512, stop_words="english").fit_transform(corpus)
+        text_features = np.asarray(text_matrix.toarray(), dtype=float)  # type: ignore[attr-defined]
+        feature_parts.append(text_features)
+
+    if not feature_parts:
+        raise ValueError("Dataset must provide numericFields or featureFields for clustering.")
+
     features = np.concatenate(feature_parts, axis=1)
 
     reducer = pacmap.PaCMAP(n_components=2, MN_ratio=0.5, FP_ratio=2.0, random_state=42)
     points = normalize_points(reducer.fit_transform(features))
 
-    min_cluster_size = max(4, min(12, len(records) // 18))
+    min_cluster_size = int(dataset.get("minClusterSize", max(4, min(12, len(records) // 18))))
     labels = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=2).fit_predict(points)
 
     grouped = defaultdict(list)

@@ -18,6 +18,8 @@ const state = {
   map: null,
   source: null,
   layer: null,
+  labelSource: null,
+  labelLayer: null,
 };
 
 const palette = [
@@ -54,7 +56,7 @@ const els = {
 
 async function loadDataset() {
   try {
-    const response = await fetch("./sample-data/cars.processed.json");
+    const response = await fetch("./sample-data/commerce.json");
     if (!response.ok)
       throw new Error(`Could not load dataset: ${response.status}`);
     const dataset = await response.json();
@@ -64,10 +66,13 @@ async function loadDataset() {
   }
 }
 
-function loadRecords(dataset) {
+function loadRecords(payload) {
+  const dataset = normalizeDataset(payload);
   const records = dataset.records;
   if (!Array.isArray(records)) {
-    throw new Error("Dataset JSON must include a records array.");
+    throw new Error(
+      "Dataset JSON must include a top-level data array or a records array.",
+    );
   }
 
   state.dataset = dataset;
@@ -93,8 +98,8 @@ function showLoadError(error) {
   els.emptyState.classList.remove("hidden");
   els.details.classList.add("hidden");
   els.emptyState.innerHTML = `
-    <span>Processed JSON is missing</span>
-    <p>Run npm run process:data, then reload http://localhost:4173.</p>
+    <span>Dataset JSON is missing or invalid</span>
+    <p>Expected { config: { dataSchema, groupingFields }, data: [] }.</p>
   `;
 }
 
@@ -111,7 +116,7 @@ function collectFields(records) {
 function buildClusters(records) {
   const grouped = new Map();
   records.forEach((record) => {
-    const id = String(record.clusterId ?? "unknown");
+    const id = String(record.__clusterId ?? record.clusterId ?? "unknown");
     if (!grouped.has(id)) grouped.set(id, []);
     grouped.get(id).push(record);
   });
@@ -120,7 +125,8 @@ function buildClusters(records) {
     .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
     .map(([id, items], index) => ({
       id,
-      name: items[0]?.clusterLabel || `Cluster ${id}`,
+      name:
+        items[0]?.__clusterLabel || items[0]?.clusterLabel || `Cluster ${id}`,
       items,
       color: id === "-1" ? "#767b81" : palette[index % palette.length],
     }));
@@ -138,7 +144,6 @@ function buildClusters(records) {
 }
 
 function renderChrome() {
-  const layout = state.dataset.layout;
   els.viewTitle.textContent = state.dataset.name || "Data Atlas";
   els.stats.innerHTML = `
     <div class="stat"><strong>${state.records.length}</strong><span>Records</span></div>
@@ -147,16 +152,7 @@ function renderChrome() {
 }
 
 function renderLegend() {
-  els.legend.innerHTML = state.clusters
-    .map(
-      (cluster) => `
-        <button class="legend-item" type="button" data-cluster="${escapeHtml(cluster.id)}">
-          <span class="swatch" style="background:${cluster.color}"></span>
-          ${escapeHtml(cluster.name)} (${cluster.items.length})
-        </button>
-      `,
-    )
-    .join("");
+  els.legend.innerHTML = "";
 }
 
 function renderList() {
@@ -204,9 +200,9 @@ function renderDetails() {
     const cluster = state.selected.value;
     els.details.innerHTML = `
       <div>
-        <p class="detail-meta">HDBSCAN cluster</p>
+        <p class="detail-meta">${escapeHtml(groupingLabel())}</p>
         <h2>${escapeHtml(cluster.name)}</h2>
-        <p class="record-detail">${cluster.items.length} nearby records in PaCMAP space.</p>
+        <p class="record-detail">${cluster.items.length} grouped records.</p>
       </div>
       <div class="field-table">
         ${cluster.items
@@ -221,7 +217,7 @@ function renderDetails() {
   const record = state.selected.value;
   els.details.innerHTML = `
     <div>
-      <p class="detail-meta">${escapeHtml(record.clusterLabel)} · ${escapeHtml(record.groupValue)}</p>
+      <p class="detail-meta">${escapeHtml(record.__clusterLabel || record.clusterLabel || "")} · ${escapeHtml(record.__groupValue || record.groupValue || "")}</p>
       <h2>${escapeHtml(record[state.dataset.titleField])}</h2>
       <p class="record-detail">${escapeHtml(record[state.dataset.detailField])}</p>
     </div>
@@ -250,16 +246,29 @@ function renderMap() {
     feature.setId(record.__index);
     return feature;
   });
+  const labelFeatures = state.clusters.map((cluster) => {
+    const feature = new Feature({
+      geometry: new Point(clusterCenter(cluster)),
+      cluster,
+    });
+    feature.setId(`label-${cluster.id}`);
+    return feature;
+  });
 
   state.source = new VectorSource({ features });
   state.layer = new VectorLayer({
     source: state.source,
     style: styleFeature,
   });
+  state.labelSource = new VectorSource({ features: labelFeatures });
+  state.labelLayer = new VectorLayer({
+    source: state.labelSource,
+    style: styleGroupLabel,
+  });
 
   state.map = new OlMap({
     target: els.map,
-    layers: [state.layer],
+    layers: [state.layer, state.labelLayer],
     view: new View({
       center: [0, 0],
       zoom: 12,
@@ -275,12 +284,25 @@ function renderMap() {
       (candidate) => candidate,
     );
     if (!feature) return;
+    const cluster = feature.get("cluster");
+    if (cluster && !feature.get("record")) {
+      state.selected = { type: "cluster", value: cluster };
+      renderDetails();
+      state.layer.changed();
+      state.labelLayer.changed();
+      fitMap(cluster);
+      return;
+    }
     state.selected = { type: "record", value: feature.get("record") };
     renderDetails();
     state.layer.changed();
+    state.labelLayer.changed();
   });
 
-  state.map.getView().on("change:resolution", () => state.layer.changed());
+  state.map.getView().on("change:resolution", () => {
+    state.layer.changed();
+    state.labelLayer.changed();
+  });
 
   fitMap();
 }
@@ -292,7 +314,7 @@ function styleFeature(feature) {
     state.selected?.type === "record" &&
     state.selected.value.__index === record.__index;
   const zoom = state.map?.getView().getZoom() || 12;
-  const showLabel = zoom >= 14 || selected;
+  const showLabel = zoom >= 16 || selected;
 
   return new Style({
     image: new CircleStyle({
@@ -312,6 +334,30 @@ function styleFeature(feature) {
   });
 }
 
+function styleGroupLabel(feature) {
+  const cluster = feature.get("cluster");
+  const selected =
+    state.selected?.type === "cluster" &&
+    state.selected.value.id === cluster.id;
+  const zoom = state.map?.getView().getZoom() || 12;
+  if (zoom >= 16 && !selected) return undefined;
+
+  const size = selected ? 18 : 15;
+  const color = selected ? "#1f2528" : cluster.color;
+  return new Style({
+    text: new Text({
+      text: truncate(cluster.name, 28),
+      font: `700 ${size}px Inter, sans-serif`,
+      fill: new Fill({ color }),
+      stroke: new Stroke({ color: "rgba(255,255,255,0.94)", width: 5 }),
+      backgroundFill: new Fill({ color: "rgba(255,255,255,0.68)" }),
+      backgroundStroke: new Stroke({ color: "rgba(31,37,40,0.12)", width: 1 }),
+      padding: [5, 8, 5, 8],
+      offsetY: -18,
+    }),
+  });
+}
+
 function fitMap(cluster) {
   const records = cluster?.items || state.records;
   const extent = boundingExtent(records.map((record) => [record.x, record.y]));
@@ -322,10 +368,166 @@ function fitMap(cluster) {
   });
 }
 
+function clusterCenter(cluster) {
+  if (!cluster.items.length) return [0, 0];
+  const totals = cluster.items.reduce(
+    (sum, record) => [sum[0] + record.x, sum[1] + record.y],
+    [0, 0],
+  );
+  return [totals[0] / cluster.items.length, totals[1] / cluster.items.length];
+}
+
 function clusterForRecord(record) {
   return state.clusters.find(
-    (cluster) => cluster.id === String(record.clusterId),
+    (cluster) => cluster.id === String(record.__clusterId ?? record.clusterId),
   );
+}
+
+function normalizeDataset(payload) {
+  if (payload?.config?.dataSchema) return normalizeConfiguredDataset(payload);
+  return normalizeLegacyDataset(payload);
+}
+
+function normalizeConfiguredDataset(payload) {
+  const config = payload.config;
+  const records = Array.isArray(payload.data) ? payload.data : [];
+  const schemaFields = Object.keys(config.dataSchema || {});
+  const groupingFields = normalizeGroupingFields(
+    config.groupingFields || config.groupingField,
+    schemaFields,
+  );
+  const titleField =
+    config.titleField ||
+    firstExistingField(schemaFields, [
+      "bookName",
+      "title",
+      "name",
+      "category",
+      "id",
+    ]) ||
+    schemaFields[0];
+  const detailField =
+    config.detailField ||
+    firstExistingField(schemaFields, ["summary", "description", "detail"]) ||
+    titleField;
+
+  return {
+    name: config.name || payload.name || "Data Atlas",
+    description: config.description || payload.description || "",
+    source: config.source || payload.source || "",
+    dataSchema: config.dataSchema,
+    groupingFields,
+    titleField,
+    detailField,
+    records: ensureLayout(records, groupingFields),
+  };
+}
+
+function normalizeLegacyDataset(payload) {
+  const records = Array.isArray(payload.records) ? payload.records : [];
+  const groupingFields = normalizeGroupingFields(
+    payload.groupingFields || payload.groupingField,
+    Object.keys(records[0] || {}),
+  );
+  return {
+    ...payload,
+    groupingFields,
+    titleField:
+      payload.titleField ||
+      firstExistingField(Object.keys(records[0] || {}), [
+        "title",
+        "name",
+        "category",
+        "id",
+      ]),
+    detailField:
+      payload.detailField ||
+      firstExistingField(Object.keys(records[0] || {}), [
+        "summary",
+        "description",
+      ]),
+    records: ensureLayout(records, groupingFields),
+  };
+}
+
+function normalizeGroupingFields(value, fields) {
+  const requested = Array.isArray(value) ? value : value ? [value] : [];
+  const valid = requested.filter((field) => fields.includes(field));
+  return valid.length ? valid : fields.slice(0, 1);
+}
+
+function firstExistingField(fields, candidates) {
+  return candidates.find((field) => fields.includes(field));
+}
+
+function ensureLayout(records, groupingFields) {
+  if (
+    records.every(
+      (record) => isFiniteNumber(record.x) && isFiniteNumber(record.y),
+    )
+  ) {
+    return records.map((record) => decorateRecord(record, groupingFields));
+  }
+
+  const grouped = new Map();
+  records.forEach((record) => {
+    const groupValue = groupValueForRecord(record, groupingFields);
+    if (!grouped.has(groupValue)) grouped.set(groupValue, []);
+    grouped.get(groupValue).push(record);
+  });
+
+  const groups = [...grouped.entries()];
+  const groupCount = Math.max(groups.length, 1);
+  return groups.flatMap(([groupValue, items], groupIndex) => {
+    const centerAngle = (Math.PI * 2 * groupIndex) / groupCount;
+    const centerRadius = groupCount === 1 ? 0 : 1200;
+    const centerX = Math.cos(centerAngle) * centerRadius;
+    const centerY = Math.sin(centerAngle) * centerRadius;
+
+    return items.map((record, itemIndex) => {
+      const itemAngle = itemIndex * 2.399963229728653;
+      const itemRadius = 70 + Math.sqrt(itemIndex) * 52;
+      return decorateRecord(
+        {
+          ...record,
+          x: centerX + Math.cos(itemAngle) * itemRadius,
+          y: centerY + Math.sin(itemAngle) * itemRadius,
+        },
+        groupingFields,
+        groupIndex,
+        groupValue,
+      );
+    });
+  });
+}
+
+function decorateRecord(record, groupingFields, clusterId, groupValue) {
+  const resolvedGroupValue =
+    groupValue ?? groupValueForRecord(record, groupingFields);
+  return {
+    ...record,
+    __clusterId: clusterId ?? record.clusterId ?? resolvedGroupValue,
+    __clusterLabel: resolvedGroupValue,
+    __groupValue: resolvedGroupValue,
+  };
+}
+
+function groupValueForRecord(record, groupingFields) {
+  if (groupingFields.length === 1) {
+    return formatValue(record[groupingFields[0]]) || "Unknown";
+  }
+  return groupingFields
+    .map((field) => `${field}: ${formatValue(record[field]) || "Unknown"}`)
+    .join(" / ");
+}
+
+function groupingLabel() {
+  const fields = state.dataset.groupingFields || [];
+  return fields.length ? `Grouped by ${fields.join(", ")}` : "Grouped records";
+}
+
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function setMode(mode) {
@@ -383,6 +585,7 @@ els.legend.addEventListener("click", (event) => {
   state.selected = { type: "cluster", value: cluster };
   renderDetails();
   state.layer.changed();
+  state.labelLayer.changed();
   fitMap(cluster);
 });
 
@@ -396,6 +599,7 @@ document.addEventListener("click", (event) => {
   state.selected = { type: "record", value: record };
   renderDetails();
   state.layer.changed();
+  state.labelLayer.changed();
   if (state.mode === "map") {
     state.map
       .getView()
