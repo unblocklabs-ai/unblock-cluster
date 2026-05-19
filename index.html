@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Data Atlas</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h1 id="viewTitle">Restaurant clusters by cuisine</h1>
+            <p id="viewSubtitle">Synthetic sample data, grouped from the cuisine field.</p>
+          </div>
+          <div class="stats" id="stats"></div>
+        </header>
+
+        <section class="map-shell" id="mapShell" aria-label="Cluster map">
+          <canvas id="mapCanvas"></canvas>
+          <button id="viewToggleButton" type="button" class="view-toggle">List</button>
+          <div class="map-controls" aria-label="Map controls">
+            <button id="zoomInButton" type="button" title="Zoom in">+</button>
+            <button id="zoomOutButton" type="button" title="Zoom out">-</button>
+          </div>
+          <div class="legend" id="legend"></div>
+        </section>
+
+        <section class="list-shell hidden" id="listShell" aria-label="Record list">
+          <button id="mapModeButton" type="button" class="view-toggle">Map</button>
+          <div id="listContent"></div>
+        </section>
+      </main>
+
+      <aside class="inspector" aria-label="Selection details">
+        <div class="empty-state" id="emptyState">
+          <span>Select a cluster or record</span>
+          <p>Click the map to inspect grouped records from the JSON file.</p>
+        </div>
+        <div class="details hidden" id="details"></div>
+      </aside>
+    </div>
+
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>
