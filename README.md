@@ -24,6 +24,7 @@ set:
 DATA_GRAPH_STORAGE=/path/to/private/storage
 DATA_GRAPH_DB=/path/to/private/storage/data-graph.sqlite3
 DATA_GRAPH_PUBLIC_ROOT=/path/to/dist
+DATA_GRAPH_PUBLIC_BASE_URL=https://your-tunnel.example.com
 DATA_GRAPH_HOST=127.0.0.1
 DATA_GRAPH_PORT=8080
 DATA_GRAPH_MAX_BODY_BYTES=8388608
@@ -32,6 +33,9 @@ DATA_GRAPH_PROCESS_DEBOUNCE_SECONDS=2.0
 
 The server loads `.env` from the project root automatically. Set
 `DATA_GRAPH_ENV=/path/to/env-file` to use a different env file.
+
+Set `DATA_GRAPH_PUBLIC_BASE_URL` to your Cloudflare Tunnel URL so API responses
+and agent help endpoints return full public URLs.
 
 ## Create A Data Sink
 

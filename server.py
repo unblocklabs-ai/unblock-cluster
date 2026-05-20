@@ -39,12 +39,19 @@ DB_PATH = Path(
     os.environ.get("DATA_GRAPH_DB", DATA_ROOT / "data-graph.sqlite3")
 ).resolve()
 PUBLIC_ROOT = Path(os.environ.get("DATA_GRAPH_PUBLIC_ROOT", ROOT / "dist")).resolve()
+PUBLIC_BASE_URL = os.environ.get("DATA_GRAPH_PUBLIC_BASE_URL", "").rstrip("/")
 MAX_BODY_BYTES = int(os.environ.get("DATA_GRAPH_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 PROCESS_DEBOUNCE_SECONDS = float(os.environ.get("DATA_GRAPH_PROCESS_DEBOUNCE_SECONDS", "2.0"))
 SUPPORTED_TYPES = {"String", "Number", "Boolean", "Object", "Array"}
 ID_PATTERN = re.compile(r"^ds_[A-Za-z0-9_-]{16,64}$")
 PROCESS_TIMERS = {}
 PROCESS_TIMERS_LOCK = threading.Lock()
+
+
+def public_url(path):
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{PUBLIC_BASE_URL}{path}" if PUBLIC_BASE_URL else path
 
 
 def now_iso():
@@ -301,6 +308,7 @@ def api_help_payload():
     return {
         "service": "Data Graph",
         "description": "Create a data graph, append JSON rows, and view grouped records.",
+        "publicBaseUrl": PUBLIC_BASE_URL or None,
         "auth": {
             "type": "bearer",
             "header": "Authorization: Bearer <token>",
@@ -384,6 +392,7 @@ def system_status_payload():
         "scheduledDataSinkIds": scheduled,
         "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
         "maxBodyBytes": MAX_BODY_BYTES,
+        "publicBaseUrl": PUBLIC_BASE_URL or None,
     }
 
 
@@ -405,7 +414,7 @@ def sink_help_payload(sink):
         },
         "append": {
             "method": "POST",
-            "url": f"/api/data-sink/{sink['id']}/data",
+            "url": public_url(f"/api/data-sink/{sink['id']}/data"),
             "contentType": "application/json",
             "body": {"data": [sample_row]},
             "behavior": "Rows are appended immediately, then the latest artifact is rebuilt after the debounce window.",
@@ -413,18 +422,18 @@ def sink_help_payload(sink):
         },
         "statusCheck": {
             "method": "GET",
-            "url": f"/api/data-sink/{sink['id']}/status",
+            "url": public_url(f"/api/data-sink/{sink['id']}/status"),
         },
         "latestArtifact": {
             "method": "GET",
-            "url": f"/api/data-sink/{sink['id']}/artifact/latest",
+            "url": public_url(f"/api/data-sink/{sink['id']}/artifact/latest"),
         },
         "clearRows": {
             "method": "DELETE",
-            "url": f"/api/data-sink/{sink['id']}/data",
+            "url": public_url(f"/api/data-sink/{sink['id']}/data"),
             "authRequired": True,
         },
-        "viewUrl": f"/clusters/{sink['id']}",
+        "viewUrl": public_url(f"/clusters/{sink['id']}"),
     }
 
 
@@ -564,9 +573,11 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
                 "rowCount": row_count,
                 "artifactCount": artifact_count,
                 "hasLatestArtifact": bool(sink["latestArtifactPath"]),
-                "viewUrl": f"/clusters/{sink_id}",
-                "ingestUrl": f"/api/data-sink/{sink_id}/data",
-                "latestArtifactUrl": f"/api/data-sink/{sink_id}/artifact/latest",
+                "viewUrl": public_url(f"/clusters/{sink_id}"),
+                "ingestUrl": public_url(f"/api/data-sink/{sink_id}/data"),
+                "latestArtifactUrl": public_url(
+                    f"/api/data-sink/{sink_id}/artifact/latest"
+                ),
                 "updatedAt": sink["updatedAt"],
             }
         )
@@ -622,8 +633,8 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         return self.send_json(
             {
                 "dataSinkId": sink_id,
-                "viewUrl": f"/clusters/{sink_id}",
-                "ingestUrl": f"/api/data-sink/{sink_id}/data",
+                "viewUrl": public_url(f"/clusters/{sink_id}"),
+                "ingestUrl": public_url(f"/api/data-sink/{sink_id}/data"),
             },
             HTTPStatus.CREATED,
         )
@@ -655,7 +666,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
                 "rowCount": len(rows),
                 "status": "processing",
                 "processAfterSeconds": PROCESS_DEBOUNCE_SECONDS,
-                "viewUrl": f"/clusters/{sink_id}",
+                "viewUrl": public_url(f"/clusters/{sink_id}"),
             },
             HTTPStatus.CREATED,
         )
@@ -690,7 +701,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             db.commit()
 
         return self.send_json(
-            {"dataSinkId": sink_id, "viewUrl": f"/clusters/{sink_id}"}
+            {"dataSinkId": sink_id, "viewUrl": public_url(f"/clusters/{sink_id}")}
         )
 
     def clear_data(self, sink_id):
@@ -732,7 +743,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
                 "cleared": True,
                 "rowCount": 0,
                 "artifactPath": artifact_path.name,
-                "viewUrl": f"/clusters/{sink_id}",
+                "viewUrl": public_url(f"/clusters/{sink_id}"),
             }
         )
 
