@@ -21,6 +21,12 @@ body {
   background: var(--surface);
 }
 
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
 button,
 input,
 select,
@@ -50,9 +56,10 @@ button.primary {
 }
 
 #app {
-  min-height: 100svh;
+  height: 100svh;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
+  overflow: hidden;
 }
 
 .inspector {
@@ -60,6 +67,7 @@ button.primary {
   backdrop-filter: blur(18px);
   padding: 22px;
   overflow: auto;
+  min-height: 0;
 }
 
 .inspector {
@@ -166,6 +174,8 @@ textarea {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .topbar {
@@ -292,6 +302,7 @@ textarea {
   position: relative;
   overflow: auto;
   padding: 78px 30px 40px;
+  min-height: 0;
 }
 
 .cluster-block {
@@ -413,8 +424,16 @@ textarea {
 }
 
 @media (max-width: 1120px) {
+  html,
+  body {
+    overflow: auto;
+  }
+
   #app {
+    height: auto;
+    min-height: 100svh;
     grid-template-columns: minmax(0, 1fr);
+    overflow: visible;
   }
 
   .inspector {
@@ -422,6 +441,7 @@ textarea {
     border-left: 0;
     border-top: 1px solid var(--line);
     min-height: 260px;
+    overflow: visible;
   }
 
   .empty-state {
@@ -442,6 +462,7 @@ textarea {
 
   .workspace {
     min-height: 100svh;
+    overflow: visible;
   }
 
   .topbar {
