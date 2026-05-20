@@ -57,16 +57,21 @@ const els = {
 async function loadDataset() {
   try {
     const sinkId = dataSinkIdFromPath();
-    const token = tokenFromUrl() || sessionStorage.getItem("dataGraphApiToken");
+    let token = tokenFromUrl() || sessionStorage.getItem("dataGraphApiToken");
     const datasetUrl = sinkId
       ? `/api/data-sink/${encodeURIComponent(sinkId)}/artifact/latest`
       : "./sample-data/commerce.json";
     if (sinkId && !token) {
-      throw new Error("Missing API token. Open this cluster with ?token=YOUR_TOKEN.");
+      token = promptForToken("Enter the API token to open this private cluster.");
+      if (!token) throw new Error("Missing API token.");
     }
-    const response = await fetch(datasetUrl, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+    let response = await fetchDataset(datasetUrl, token);
+    if (sinkId && response.status === 401) {
+      sessionStorage.removeItem("dataGraphApiToken");
+      token = promptForToken("That token was rejected. Paste the API token again.");
+      if (!token) throw new Error("Invalid or missing API token.");
+      response = await fetchDataset(datasetUrl, token);
+    }
     if (!response.ok)
       throw new Error(`Could not load dataset: ${response.status}`);
     const dataset = await response.json();
@@ -74,6 +79,20 @@ async function loadDataset() {
   } catch (error) {
     showLoadError(error);
   }
+}
+
+function fetchDataset(datasetUrl, token) {
+  return fetch(datasetUrl, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+}
+
+function promptForToken(message) {
+  const token = window.prompt(message);
+  const trimmed = token?.trim();
+  if (!trimmed) return null;
+  sessionStorage.setItem("dataGraphApiToken", trimmed);
+  return trimmed;
 }
 
 function tokenFromUrl() {
