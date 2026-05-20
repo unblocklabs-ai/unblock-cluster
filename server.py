@@ -43,7 +43,8 @@ PUBLIC_BASE_URL = os.environ.get("DATA_GRAPH_PUBLIC_BASE_URL", "").rstrip("/")
 MAX_BODY_BYTES = int(os.environ.get("DATA_GRAPH_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 PROCESS_DEBOUNCE_SECONDS = float(os.environ.get("DATA_GRAPH_PROCESS_DEBOUNCE_SECONDS", "2.0"))
 SUPPORTED_TYPES = {"String", "Number", "Boolean", "Object", "Array"}
-ID_PATTERN = re.compile(r"^ds_[A-Za-z0-9_-]{16,64}$")
+ID_PATTERN = re.compile(r"^dg_[A-Za-z0-9_-]{16,64}$")
+GRAPH_ROUTE_PATTERN = r"/api/data-graph/(dg_[A-Za-z0-9_-]+)"
 PROCESS_TIMERS = {}
 PROCESS_TIMERS_LOCK = threading.Lock()
 
@@ -121,10 +122,10 @@ def connect_db():
 
 def sink_dir(sink_id):
     if not ID_PATTERN.match(sink_id):
-        raise ValueError("Invalid data sink id.")
+        raise ValueError("Invalid data graph id.")
     path = (DATA_ROOT / "sinks" / sink_id).resolve()
     if DATA_ROOT not in path.parents:
-        raise ValueError("Invalid data sink path.")
+        raise ValueError("Invalid data graph path.")
     return path
 
 
@@ -313,10 +314,10 @@ def api_help_payload():
             "type": "bearer",
             "header": "Authorization: Bearer <token>",
             "requiredFor": [
-                "POST /api/data-sink",
-                "POST /api/data-sink/:id/data",
-                "PATCH /api/data-sink/:id/schema",
-                "DELETE /api/data-sink/:id/data",
+                "POST /api/data-graph",
+                "POST /api/data-graph/:id/data",
+                "PATCH /api/data-graph/:id/schema",
+                "DELETE /api/data-graph/:id/data",
             ],
         },
         "browserAuth": {
@@ -326,54 +327,82 @@ def api_help_payload():
             "behavior": "The browser stores the token in sessionStorage, removes it from the visible URL, and uses it as the Authorization bearer token for private API requests.",
             "securityNote": "This convenience is intended for a small private deployment. Treat tokenized URLs as secrets.",
         },
-        "types": sorted(SUPPORTED_TYPES),
+        "dataSchemaTypes": {
+            "description": "Allowed values for each config.dataSchema field type.",
+            "allowed": sorted(SUPPORTED_TYPES),
+        },
         "endpoints": {
-            "status": "GET /api/status",
-            "createDataGraph": "POST /api/data-sink",
-            "getDataGraph": "GET /api/data-sink/:id",
-            "getDataGraphStatus": "GET /api/data-sink/:id/status",
-            "getDataGraphHelp": "GET /api/data-sink/:id/help",
-            "appendRows": "POST /api/data-sink/:id/data",
-            "clearRows": "DELETE /api/data-sink/:id/data",
-            "latestArtifact": "GET /api/data-sink/:id/artifact/latest",
-            "view": "GET /clusters/:id",
-        },
-        "createRequest": {
-            "config": {
-                "name": "Book Clusters",
-                "dataSchema": {
-                    "bookName": "String",
-                    "genre": "String",
-                    "summary": "String",
-                },
-                "groupingFields": ["genre"],
-                "titleField": "bookName",
-                "detailField": "summary",
+            "status": {
+                "method": "GET",
+                "url": "/api/status",
             },
-            "data": [
-                {
-                    "bookName": "Dune",
-                    "genre": "Science Fiction",
-                    "summary": "A desert planet power struggle.",
-                }
-            ],
+            "createDataGraph": {
+                "method": "POST",
+                "url": "/api/data-graph",
+                "payload": {
+                    "config": {
+                        "name": "Book Clusters",
+                        "dataSchema": {
+                            "bookName": "String",
+                            "genre": "String",
+                            "summary": "String",
+                        },
+                        "groupingFields": ["genre"],
+                        "titleField": "bookName",
+                        "detailField": "summary",
+                    },
+                    "data": [
+                        {
+                            "bookName": "Dune",
+                            "genre": "Science Fiction",
+                            "summary": "A desert planet power struggle.",
+                        }
+                    ],
+                },
+            },
+            "getDataGraph": {
+                "method": "GET",
+                "url": "/api/data-graph/:id",
+            },
+            "getDataGraphStatus": {
+                "method": "GET",
+                "url": "/api/data-graph/:id/status",
+            },
+            "getDataGraphHelp": {
+                "method": "GET",
+                "url": "/api/data-graph/:id/help",
+            },
+            "appendRows": {
+                "method": "POST",
+                "url": "/api/data-graph/:id/data",
+                "payload": {
+                    "data": [
+                        {
+                            "bookName": "Dune",
+                            "genre": "Science Fiction",
+                            "summary": "A desert planet power struggle.",
+                        }
+                    ]
+                },
+            },
+            "clearRows": {
+                "method": "DELETE",
+                "url": "/api/data-graph/:id/data",
+            },
+            "view": {
+                "method": "GET",
+                "url": "/clusters/:id",
+            },
         },
-        "appendRequest": {
-            "data": [
-                {
-                    "bookName": "Dune",
-                    "genre": "Science Fiction",
-                    "summary": "A desert planet power struggle.",
-                }
+        "notes": "\n".join(
+            [
+                "Every grouping field must exist in config.dataSchema.",
+                "titleField and detailField are optional, but must exist in config.dataSchema when provided.",
+                "POST /api/data-graph/:id/data appends rows; it does not overwrite existing rows.",
+                "Appended rows are processed after a debounce window so rapid requests are batched.",
+                "Use GET /api/data-graph/:id/status to check processing state and row counts.",
             ]
-        },
-        "notes": [
-            "Every grouping field must exist in config.dataSchema.",
-            "titleField and detailField are optional, but must exist in config.dataSchema when provided.",
-            "POST /api/data-sink/:id/data appends rows; it does not overwrite existing rows.",
-            "Appended rows are processed after a debounce window so rapid requests are batched.",
-            "Use GET /api/data-sink/:id/status to check processing state and row counts.",
-        ],
+        ),
     }
 
 
@@ -391,12 +420,12 @@ def system_status_payload():
         "time": now_iso(),
         "storage": "filesystem",
         "database": "sqlite",
-        "dataSinkCount": sink_count,
+        "dataGraphCount": sink_count,
         "batchCount": batch_count,
         "rowCount": row_count,
         "artifactCount": artifact_count,
         "scheduledProcessingCount": len(scheduled),
-        "scheduledDataSinkIds": scheduled,
+        "scheduledDataGraphIds": scheduled,
         "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
         "maxBodyBytes": MAX_BODY_BYTES,
         "publicBaseUrl": PUBLIC_BASE_URL or None,
@@ -407,7 +436,7 @@ def sink_help_payload(sink):
     config = sink["config"]
     sample_row = sample_row_for_schema(config["dataSchema"])
     return {
-        "dataSinkId": sink["id"],
+        "dataGraphId": sink["id"],
         "name": sink["name"],
         "status": sink["status"],
         "schema": config["dataSchema"],
@@ -421,7 +450,7 @@ def sink_help_payload(sink):
         },
         "append": {
             "method": "POST",
-            "url": public_url(f"/api/data-sink/{sink['id']}/data"),
+            "url": public_url(f"/api/data-graph/{sink['id']}/data"),
             "contentType": "application/json",
             "body": {"data": [sample_row]},
             "behavior": "Rows are appended immediately, then the latest artifact is rebuilt after the debounce window.",
@@ -429,15 +458,15 @@ def sink_help_payload(sink):
         },
         "statusCheck": {
             "method": "GET",
-            "url": public_url(f"/api/data-sink/{sink['id']}/status"),
+            "url": public_url(f"/api/data-graph/{sink['id']}/status"),
         },
         "latestArtifact": {
             "method": "GET",
-            "url": public_url(f"/api/data-sink/{sink['id']}/artifact/latest"),
+            "url": public_url(f"/api/data-graph/{sink['id']}/artifact/latest"),
         },
         "clearRows": {
             "method": "DELETE",
-            "url": public_url(f"/api/data-sink/{sink['id']}/data"),
+            "url": public_url(f"/api/data-graph/{sink['id']}/data"),
             "authRequired": True,
         },
         "viewUrl": public_url(f"/clusters/{sink['id']}"),
@@ -497,9 +526,9 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/") and not self.require_auth():
             return
-        if parsed.path == "/api/data-sink":
+        if parsed.path == "/api/data-graph":
             return self.create_sink()
-        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/data", parsed.path)
+        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/data", parsed.path)
         if match:
             return self.ingest_data(match.group(1))
         return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
@@ -508,7 +537,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/") and not self.require_auth():
             return
-        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/schema", parsed.path)
+        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/schema", parsed.path)
         if match:
             return self.update_schema(match.group(1))
         return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
@@ -517,7 +546,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/") and not self.require_auth():
             return
-        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/data", parsed.path)
+        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/data", parsed.path)
         if match:
             return self.clear_data(match.group(1))
         return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
@@ -529,33 +558,33 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         if path == "/api/status":
             return self.send_json(system_status_payload())
 
-        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)$", path)
+        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}$", path)
         if match:
             with connect_db() as db:
                 sink = load_sink(db, match.group(1))
             if not sink:
                 return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data sink not found."
+                    HTTPStatus.NOT_FOUND, "Data graph not found."
                 )
             return self.send_json(sink)
 
-        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/status", path)
+        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/status", path)
         if match:
             return self.send_sink_status(match.group(1))
 
-        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/help", path)
+        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/help", path)
         if match:
             return self.send_sink_help(match.group(1))
 
         match = re.fullmatch(
-            r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/artifact/latest", path
+            f"{GRAPH_ROUTE_PATTERN}/artifact/latest", path
         )
         if match:
             with connect_db() as db:
                 sink = load_sink(db, match.group(1))
             if not sink:
                 return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data sink not found."
+                    HTTPStatus.NOT_FOUND, "Data graph not found."
                 )
             if not sink["latestArtifactPath"]:
                 return self.send_json({"config": sink["config"], "data": []})
@@ -571,7 +600,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             sink = load_sink(db, sink_id)
             if not sink:
                 return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data sink not found."
+                    HTTPStatus.NOT_FOUND, "Data graph not found."
                 )
             batch_count = db.execute(
                 "SELECT COUNT(*) FROM data_batches WHERE sink_id = ?", (sink_id,)
@@ -586,7 +615,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
         return self.send_json(
             {
-                "dataSinkId": sink_id,
+                "dataGraphId": sink_id,
                 "name": sink["name"],
                 "status": sink["status"],
                 "processingScheduled": is_rebuild_scheduled(sink_id),
@@ -596,9 +625,9 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
                 "artifactCount": artifact_count,
                 "hasLatestArtifact": bool(sink["latestArtifactPath"]),
                 "viewUrl": public_url(f"/clusters/{sink_id}"),
-                "ingestUrl": public_url(f"/api/data-sink/{sink_id}/data"),
+                "ingestUrl": public_url(f"/api/data-graph/{sink_id}/data"),
                 "latestArtifactUrl": public_url(
-                    f"/api/data-sink/{sink_id}/artifact/latest"
+                    f"/api/data-graph/{sink_id}/artifact/latest"
                 ),
                 "updatedAt": sink["updatedAt"],
             }
@@ -608,7 +637,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         with connect_db() as db:
             sink = load_sink(db, sink_id)
         if not sink:
-            return self.send_error_json(HTTPStatus.NOT_FOUND, "Data sink not found.")
+            return self.send_error_json(HTTPStatus.NOT_FOUND, "Data graph not found.")
         return self.send_json(sink_help_payload(sink))
 
     def create_sink(self):
@@ -620,7 +649,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         except ValueError as error:
             return self.send_error_json(HTTPStatus.BAD_REQUEST, str(error))
 
-        sink_id = new_id("ds")
+        sink_id = new_id("dg")
         created_at = now_iso()
         base_dir = sink_dir(sink_id)
         ensure_private_dir(base_dir)
@@ -652,9 +681,12 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
         return self.send_json(
             {
-                "dataSinkId": sink_id,
+                "dataGraphId": sink_id,
                 "viewUrl": public_url(f"/clusters/{sink_id}"),
-                "ingestUrl": public_url(f"/api/data-sink/{sink_id}/data"),
+                "ingestUrl": public_url(f"/api/data-graph/{sink_id}/data"),
+                "latestArtifactUrl": public_url(
+                    f"/api/data-graph/{sink_id}/artifact/latest"
+                ),
             },
             HTTPStatus.CREATED,
         )
@@ -664,7 +696,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             sink = load_sink(db, sink_id)
             if not sink:
                 return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data sink not found."
+                    HTTPStatus.NOT_FOUND, "Data graph not found."
                 )
             try:
                 payload = self.read_json_body()
@@ -679,7 +711,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
         return self.send_json(
             {
-                "dataSinkId": sink_id,
+                "dataGraphId": sink_id,
                 "batchId": batch_id,
                 "rowCount": len(rows),
                 "status": "processing",
@@ -700,7 +732,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             sink = load_sink(db, sink_id)
             if not sink:
                 return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data sink not found."
+                    HTTPStatus.NOT_FOUND, "Data graph not found."
                 )
             existing_rows = read_all_rows(db, sink_id)
             try:
@@ -717,7 +749,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             db.commit()
 
         return self.send_json(
-            {"dataSinkId": sink_id, "viewUrl": public_url(f"/clusters/{sink_id}")}
+            {"dataGraphId": sink_id, "viewUrl": public_url(f"/clusters/{sink_id}")}
         )
 
     def clear_data(self, sink_id):
@@ -726,7 +758,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             sink = load_sink(db, sink_id)
             if not sink:
                 return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data sink not found."
+                    HTTPStatus.NOT_FOUND, "Data graph not found."
                 )
 
             raw_paths = [
@@ -753,7 +785,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
         return self.send_json(
             {
-                "dataSinkId": sink_id,
+                "dataGraphId": sink_id,
                 "cleared": True,
                 "rowCount": 0,
                 "artifactPath": artifact_path.name,

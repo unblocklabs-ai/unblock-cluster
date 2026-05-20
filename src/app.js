@@ -56,17 +56,17 @@ const els = {
 
 async function loadDataset() {
   try {
-    const sinkId = dataSinkIdFromPath();
+    const graphId = dataGraphIdFromPath();
     let token = tokenFromUrl() || sessionStorage.getItem("dataGraphApiToken");
-    const datasetUrl = sinkId
-      ? `/api/data-sink/${encodeURIComponent(sinkId)}/artifact/latest`
+    const datasetUrl = graphId
+      ? `/api/data-graph/${encodeURIComponent(graphId)}/artifact/latest`
       : "./sample-data/commerce.json";
-    if (sinkId && !token) {
+    if (graphId && !token) {
       token = promptForToken("Enter the API token to open this private cluster.");
       if (!token) throw new Error("Missing API token.");
     }
     let response = await fetchDataset(datasetUrl, token);
-    if (sinkId && response.status === 401) {
+    if (graphId && response.status === 401) {
       sessionStorage.removeItem("dataGraphApiToken");
       token = promptForToken("That token was rejected. Paste the API token again.");
       if (!token) throw new Error("Invalid or missing API token.");
@@ -105,7 +105,7 @@ function tokenFromUrl() {
   return token;
 }
 
-function dataSinkIdFromPath() {
+function dataGraphIdFromPath() {
   const match = window.location.pathname.match(/^\/clusters\/([^/]+)$/);
   return match ? decodeURIComponent(match[1]) : null;
 }

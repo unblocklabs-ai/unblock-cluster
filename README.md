@@ -1,6 +1,6 @@
 # Data Graph
 
-Local-first data graph service for creating data sinks, ingesting JSON rows, and
+Local-first data graph service for creating data graphs, ingesting JSON rows, and
 viewing grouped records in the browser.
 
 The local deployment uses SQLite for metadata and the filesystem for raw batches
@@ -53,7 +53,7 @@ logs:
 Runtime logs are written under `local-data/runtime/` by default. Set
 `DATA_GRAPH_RUNTIME_DIR=/path/to/runtime` to override that location.
 
-## Create A Data Sink
+## Create A Data Graph
 
 Agents can discover the API shape first:
 
@@ -68,7 +68,7 @@ curl -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
 ```sh
 export DATA_GRAPH_API_TOKEN="$(grep '^DATA_GRAPH_API_TOKEN=' .env | cut -d= -f2-)"
 
-curl -X POST http://127.0.0.1:8080/api/data-sink \
+curl -X POST http://127.0.0.1:8080/api/data-graph \
   -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -90,9 +90,9 @@ The response includes:
 
 ```json
 {
-  "dataSinkId": "ds_...",
-  "viewUrl": "/clusters/ds_...",
-  "ingestUrl": "/api/data-sink/ds_.../data"
+  "dataGraphId": "dg_...",
+  "viewUrl": "/clusters/dg_...",
+  "ingestUrl": "/api/data-graph/dg_.../data"
 }
 ```
 
@@ -103,7 +103,7 @@ rebuilt after a short debounce window, so multiple quick append requests are
 processed together.
 
 ```sh
-curl -X POST http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/data \
+curl -X POST http://127.0.0.1:8080/api/data-graph/dg_REPLACE_ME/data \
   -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -124,10 +124,10 @@ Agents can inspect the exact expected schema and current processing state:
 
 ```sh
 curl -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
-  http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/help
+  http://127.0.0.1:8080/api/data-graph/dg_REPLACE_ME/help
 
 curl -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
-  http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/status
+  http://127.0.0.1:8080/api/data-graph/dg_REPLACE_ME/status
 ```
 
 To stress-test debounced parallel appends:
@@ -138,17 +138,17 @@ PARALLEL_REQUESTS=10 DEBOUNCE_WAIT_SECONDS=3 ./scripts/test_parallel_ingest.sh
 
 ## Clear Data
 
-This keeps the sink schema/configuration and removes all ingested rows.
+This keeps the data graph schema/configuration and removes all ingested rows.
 
 ```sh
-curl -X DELETE http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/data \
+curl -X DELETE http://127.0.0.1:8080/api/data-graph/dg_REPLACE_ME/data \
   -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN"
 ```
 
 Open the cluster UI at:
 
 ```txt
-http://127.0.0.1:8080/clusters/ds_REPLACE_ME?token=YOUR_TOKEN
+http://127.0.0.1:8080/clusters/dg_REPLACE_ME?token=YOUR_TOKEN
 ```
 
 The browser stores the token in `sessionStorage` and removes it from the visible
@@ -165,6 +165,6 @@ URLs as secrets.
   of it before exposing it outside the Mac mini.
 - Keep `local-data/` outside web roots and backed up.
 - The server validates `groupingFields`, `titleField`, and `detailField` against
-  `dataSchema` before creating or updating a sink.
+  `dataSchema` before creating or updating a data graph.
 - Raw data and processed artifacts are never served by direct file path; the API
-  reads artifacts by sink ID.
+  reads artifacts by data graph ID.
