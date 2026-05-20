@@ -276,6 +276,13 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             return self.update_schema(match.group(1))
         return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
 
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/data", parsed.path)
+        if match:
+            return self.clear_data(match.group(1))
+        return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
+
     def handle_api_get(self, path):
         match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)$", path)
         if match:
@@ -415,6 +422,48 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
         return self.send_json(
             {"dataSinkId": sink_id, "viewUrl": f"/clusters/{sink_id}"}
+        )
+
+    def clear_data(self, sink_id):
+        if not self.require_auth():
+            return
+        with connect_db() as db:
+            sink = load_sink(db, sink_id)
+            if not sink:
+                return self.send_error_json(
+                    HTTPStatus.NOT_FOUND, "Data sink not found."
+                )
+
+            raw_paths = [
+                Path(row["raw_path"]).resolve()
+                for row in db.execute(
+                    "SELECT raw_path FROM data_batches WHERE sink_id = ?", (sink_id,)
+                ).fetchall()
+            ]
+            artifact_paths = [
+                Path(row["artifact_path"]).resolve()
+                for row in db.execute(
+                    "SELECT artifact_path FROM artifacts WHERE sink_id = ?", (sink_id,)
+                ).fetchall()
+            ]
+
+            for path in raw_paths + artifact_paths:
+                if DATA_ROOT in path.parents and path.exists():
+                    path.unlink()
+
+            db.execute("DELETE FROM data_batches WHERE sink_id = ?", (sink_id,))
+            db.execute("DELETE FROM artifacts WHERE sink_id = ?", (sink_id,))
+            artifact_path = write_artifact(db, sink, [])
+            db.commit()
+
+        return self.send_json(
+            {
+                "dataSinkId": sink_id,
+                "cleared": True,
+                "rowCount": 0,
+                "artifactPath": artifact_path.name,
+                "viewUrl": f"/clusters/{sink_id}",
+            }
         )
 
     def persist_batch(self, db, sink, rows):

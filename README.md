@@ -82,6 +82,15 @@ curl -X POST http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/data \
   }'
 ```
 
+## Clear Data
+
+This keeps the sink schema/configuration and removes all ingested rows.
+
+```sh
+curl -X DELETE http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/data \
+  -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN"
+```
+
 Open the cluster UI at:
 
 ```txt
