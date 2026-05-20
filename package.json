@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173",
     "build": "vite build",
-    "serve": "python3 server.py",
-    "check": "node --check src/app.js && python3 -m py_compile server.py"
+    "serve": ".venv/bin/python server.py",
+    "check": "node --check src/app.js && .venv/bin/python -m py_compile server.py processor.py"
   },
   "dependencies": {
     "@vitejs/plugin-basic-ssl": "^2.3.0",

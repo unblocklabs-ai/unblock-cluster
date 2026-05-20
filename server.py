@@ -9,10 +9,13 @@ import sqlite3
 import sys
 import threading
 from datetime import UTC, datetime
-from http import HTTPStatus
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from processor import default_feature_fields, default_numeric_fields, process_records
 
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = Path(os.environ.get("DATA_GRAPH_ENV", ROOT / ".env")).resolve()
@@ -44,7 +47,6 @@ MAX_BODY_BYTES = int(os.environ.get("DATA_GRAPH_MAX_BODY_BYTES", str(8 * 1024 * 
 PROCESS_DEBOUNCE_SECONDS = float(os.environ.get("DATA_GRAPH_PROCESS_DEBOUNCE_SECONDS", "2.0"))
 SUPPORTED_TYPES = {"String", "Number", "Boolean", "Object", "Array"}
 ID_PATTERN = re.compile(r"^dg_[A-Za-z0-9_-]{16,64}$")
-GRAPH_ROUTE_PATTERN = r"/api/data-graph/(dg_[A-Za-z0-9_-]+)"
 PROCESS_TIMERS = {}
 PROCESS_TIMERS_LOCK = threading.Lock()
 
@@ -238,7 +240,14 @@ def write_artifact(db, sink, data):
     artifact_id = new_id("art")
     artifact_path = sink_dir(sink["id"]) / "processed" / f"{artifact_id}.json"
     ensure_private_dir(artifact_path.parent)
-    payload = {"config": sink["config"], "data": data}
+    payload = {
+        "config": sink["config"],
+        "layout": {
+            "method": "PaCMAP",
+            "clusterMethod": "HDBSCAN",
+        },
+        "data": data,
+    }
     artifact_path.write_text(pretty_json(payload))
 
     created_at = now_iso()
@@ -290,7 +299,8 @@ def process_pending_sink(sink_id):
             sink = load_sink(db, sink_id)
             if not sink:
                 return
-            write_artifact(db, sink, read_all_rows(db, sink_id))
+            rows = read_all_rows(db, sink_id)
+            write_artifact(db, sink, process_records(sink, rows))
             db.commit()
     except Exception as error:
         print(f"Failed to process {sink_id}: {error}", file=sys.stderr)
@@ -343,6 +353,12 @@ def api_help_payload():
                         "groupingFields": ["genre"],
                         "titleField": "bookName",
                         "detailField": "summary",
+                        "cluster": {
+                            "method": "PaCMAP+HDBSCAN",
+                            "featureFields": ["bookName", "summary"],
+                            "numericFields": [],
+                            "minClusterSize": 3,
+                        },
                     },
                     "data": [
                         {
@@ -393,6 +409,8 @@ def api_help_payload():
                 "titleField and detailField are optional, but must exist in config.dataSchema when provided.",
                 "POST /api/data-graph/:id/data appends rows; it does not overwrite existing rows.",
                 "Appended rows are processed after a debounce window so rapid requests are batched.",
+                "Processing uses PaCMAP for 2D layout and HDBSCAN for cluster labels.",
+                "Optional config.cluster.featureFields, numericFields, and minClusterSize can tune processing.",
                 "Use GET /api/data-graph/:id/status to check processing state and row counts.",
             ]
         ),
@@ -436,6 +454,13 @@ def sink_help_payload(sink):
         "groupingFields": config["groupingFields"],
         "titleField": config.get("titleField"),
         "detailField": config.get("detailField"),
+        "processor": {
+            "layoutMethod": "PaCMAP",
+            "clusterMethod": "HDBSCAN",
+            "featureFields": (config.get("cluster") or {}).get("featureFields", default_feature_fields(config)),
+            "numericFields": (config.get("cluster") or {}).get("numericFields", default_numeric_fields(config)),
+            "minClusterSize": (config.get("cluster") or {}).get("minClusterSize"),
+        },
         "auth": {
             "type": "bearer",
             "header": "Authorization: Bearer <token>",
@@ -484,377 +509,348 @@ def sample_value_for_type(field_type):
     return None
 
 
-class DataGraphHandler(SimpleHTTPRequestHandler):
-    server_version = "DataGraphLocal/0.1"
+app = FastAPI(title="Data Graph", docs_url=None, redoc_url=None)
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(PUBLIC_ROOT), **kwargs)
 
-    def end_headers(self):
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "same-origin")
-        self.send_header(
-            "Cache-Control", "no-store" if self.path.startswith("/api/") else "no-cache"
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse({"error": "Invalid request body."}, status_code=400)
+
+
+@app.on_event("startup")
+def startup():
+    init_storage()
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_BODY_BYTES:
+                return JSONResponse(
+                    {"error": "Request body is too large."},
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                )
+        except ValueError:
+            return JSONResponse(
+                {"error": "Invalid Content-Length."},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Cache-Control"] = (
+        "no-store" if request.url.path.startswith("/api/") else "no-cache"
+    )
+    return response
+
+
+def require_auth(authorization: str = Header(default="")):
+    expected = os.environ.get("DATA_GRAPH_API_TOKEN")
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="DATA_GRAPH_API_TOKEN is required before APIs can be used.",
         )
-        super().end_headers()
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/"):
-            if not self.require_auth():
-                return
-            return self.handle_api_get(parsed.path)
-        if parsed.path.startswith("/clusters/"):
-            return self.serve_index()
-        return super().do_GET()
-
-    def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/") and not self.require_auth():
-            return
-        if parsed.path == "/api/data-graph":
-            return self.create_sink()
-        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/data", parsed.path)
-        if match:
-            return self.ingest_data(match.group(1))
-        return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
-
-    def do_PATCH(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/") and not self.require_auth():
-            return
-        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/schema", parsed.path)
-        if match:
-            return self.update_schema(match.group(1))
-        return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
-
-    def do_DELETE(self):
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/") and not self.require_auth():
-            return
-        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/data", parsed.path)
-        if match:
-            return self.clear_data(match.group(1))
-        return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
-
-    def handle_api_get(self, path):
-        if path in ("/api/help", "/api"):
-            return self.send_json(api_help_payload())
-
-        if path == "/api/status":
-            return self.send_json(system_status_payload())
-
-        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}$", path)
-        if match:
-            with connect_db() as db:
-                sink = load_sink(db, match.group(1))
-            if not sink:
-                return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data graph not found."
-                )
-            return self.send_json(sink)
-
-        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/status", path)
-        if match:
-            return self.send_sink_status(match.group(1))
-
-        match = re.fullmatch(f"{GRAPH_ROUTE_PATTERN}/help", path)
-        if match:
-            return self.send_sink_help(match.group(1))
-
-        match = re.fullmatch(
-            f"{GRAPH_ROUTE_PATTERN}/artifact/latest", path
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization must use a bearer token.",
         )
-        if match:
-            with connect_db() as db:
-                sink = load_sink(db, match.group(1))
-            if not sink:
-                return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data graph not found."
-                )
-            if not sink["latestArtifactPath"]:
-                return self.send_json({"config": sink["config"], "data": []})
-            artifact_path = Path(sink["latestArtifactPath"]).resolve()
-            if DATA_ROOT not in artifact_path.parents or not artifact_path.exists():
-                return self.send_error_json(HTTPStatus.NOT_FOUND, "Artifact not found.")
-            return self.send_json(json.loads(artifact_path.read_text()))
-
-        return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
-
-    def send_sink_status(self, sink_id):
-        with connect_db() as db:
-            sink = load_sink(db, sink_id)
-            if not sink:
-                return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data graph not found."
-                )
-            batch_count = db.execute(
-                "SELECT COUNT(*) FROM data_batches WHERE sink_id = ?", (sink_id,)
-            ).fetchone()[0]
-            row_count = db.execute(
-                "SELECT COALESCE(SUM(row_count), 0) FROM data_batches WHERE sink_id = ?",
-                (sink_id,),
-            ).fetchone()[0]
-            artifact_count = db.execute(
-                "SELECT COUNT(*) FROM artifacts WHERE sink_id = ?", (sink_id,)
-            ).fetchone()[0]
-
-        return self.send_json(
-            {
-                "dataGraphId": sink_id,
-                "name": sink["name"],
-                "status": sink["status"],
-                "processingScheduled": is_rebuild_scheduled(sink_id),
-                "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
-                "batchCount": batch_count,
-                "rowCount": row_count,
-                "artifactCount": artifact_count,
-                "hasLatestArtifact": bool(sink["latestArtifactPath"]),
-                "viewUrl": public_url(f"/clusters/{sink_id}"),
-                "ingestUrl": public_url(f"/api/data-graph/{sink_id}/data"),
-                "latestArtifactUrl": public_url(
-                    f"/api/data-graph/{sink_id}/artifact/latest"
-                ),
-                "updatedAt": sink["updatedAt"],
-            }
+    provided = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid bearer token.",
         )
 
-    def send_sink_help(self, sink_id):
-        with connect_db() as db:
-            sink = load_sink(db, sink_id)
+
+def persist_batch(db, sink, rows):
+    batch_id = new_id("batch")
+    batch_path = sink_dir(sink["id"]) / "raw" / f"{batch_id}.json"
+    batch_path.write_text(pretty_json({"data": rows}))
+    created_at = now_iso()
+    db.execute(
+        "INSERT INTO data_batches (id, sink_id, raw_path, row_count, created_at) VALUES (?, ?, ?, ?, ?)",
+        (batch_id, sink["id"], str(batch_path), len(rows), created_at),
+    )
+    return batch_id
+
+
+def get_data_graph_status_payload(graph_id):
+    with connect_db() as db:
+        sink = load_sink(db, graph_id)
         if not sink:
-            return self.send_error_json(HTTPStatus.NOT_FOUND, "Data graph not found.")
-        return self.send_json(sink_help_payload(sink))
+            raise HTTPException(status_code=404, detail="Data graph not found.")
+        batch_count = db.execute(
+            "SELECT COUNT(*) FROM data_batches WHERE sink_id = ?", (graph_id,)
+        ).fetchone()[0]
+        row_count = db.execute(
+            "SELECT COALESCE(SUM(row_count), 0) FROM data_batches WHERE sink_id = ?",
+            (graph_id,),
+        ).fetchone()[0]
+        artifact_count = db.execute(
+            "SELECT COUNT(*) FROM artifacts WHERE sink_id = ?", (graph_id,)
+        ).fetchone()[0]
 
-    def create_sink(self):
-        try:
-            payload = self.read_json_body()
-            config = validate_config(payload.get("config"))
-            rows = payload.get("data", [])
-            validate_rows(config, rows)
-        except ValueError as error:
-            return self.send_error_json(HTTPStatus.BAD_REQUEST, str(error))
+    return {
+        "dataGraphId": graph_id,
+        "name": sink["name"],
+        "status": sink["status"],
+        "processingScheduled": is_rebuild_scheduled(graph_id),
+        "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
+        "batchCount": batch_count,
+        "rowCount": row_count,
+        "artifactCount": artifact_count,
+        "hasLatestArtifact": bool(sink["latestArtifactPath"]),
+        "viewUrl": public_url(f"/clusters/{graph_id}"),
+        "ingestUrl": public_url(f"/api/data-graph/{graph_id}/data"),
+        "latestArtifactUrl": public_url(f"/api/data-graph/{graph_id}/artifact/latest"),
+        "updatedAt": sink["updatedAt"],
+    }
 
-        sink_id = new_id("dg")
-        created_at = now_iso()
-        base_dir = sink_dir(sink_id)
-        ensure_private_dir(base_dir)
-        ensure_private_dir(base_dir / "raw")
-        ensure_private_dir(base_dir / "processed")
 
-        with connect_db() as db:
-            db.execute(
-                """
-                INSERT INTO data_sinks (id, name, config_json, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sink_id,
-                    config["name"],
-                    json_dumps(config),
-                    "created",
-                    created_at,
-                    created_at,
-                ),
-            )
-            sink = load_sink(db, sink_id)
-            if rows:
-                self.persist_batch(db, sink, rows)
-                mark_sink_processing(db, sink_id)
-            db.commit()
-        if rows:
-            schedule_artifact_rebuild(sink_id)
+@app.get("/api/help", dependencies=[Depends(require_auth)])
+@app.get("/api", dependencies=[Depends(require_auth)])
+def get_api_help():
+    return api_help_payload()
 
-        return self.send_json(
-            {
-                "dataGraphId": sink_id,
-                "viewUrl": public_url(f"/clusters/{sink_id}"),
-                "ingestUrl": public_url(f"/api/data-graph/{sink_id}/data"),
-                "latestArtifactUrl": public_url(
-                    f"/api/data-graph/{sink_id}/artifact/latest"
-                ),
-            },
-            HTTPStatus.CREATED,
-        )
 
-    def ingest_data(self, sink_id):
-        with connect_db() as db:
-            sink = load_sink(db, sink_id)
-            if not sink:
-                return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data graph not found."
-                )
-            try:
-                payload = self.read_json_body()
-                rows = validate_rows(sink["config"], payload.get("data"))
-            except ValueError as error:
-                return self.send_error_json(HTTPStatus.BAD_REQUEST, str(error))
+@app.get("/api/status", dependencies=[Depends(require_auth)])
+def get_api_status():
+    return system_status_payload()
 
-            batch_id = self.persist_batch(db, sink, rows)
-            mark_sink_processing(db, sink_id)
-            db.commit()
-        schedule_artifact_rebuild(sink_id)
 
-        return self.send_json(
-            {
-                "dataGraphId": sink_id,
-                "batchId": batch_id,
-                "rowCount": len(rows),
-                "status": "processing",
-                "processAfterSeconds": PROCESS_DEBOUNCE_SECONDS,
-                "viewUrl": public_url(f"/clusters/{sink_id}"),
-            },
-            HTTPStatus.CREATED,
-        )
+@app.post(
+    "/api/data-graph",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_auth)],
+)
+def create_data_graph(payload: dict = Body(...)):
+    try:
+        config = validate_config(payload.get("config"))
+        rows = payload.get("data", [])
+        validate_rows(config, rows)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
-    def update_schema(self, sink_id):
-        try:
-            payload = self.read_json_body()
-            config = validate_config(payload.get("config"))
-        except ValueError as error:
-            return self.send_error_json(HTTPStatus.BAD_REQUEST, str(error))
+    graph_id = new_id("dg")
+    created_at = now_iso()
+    base_dir = sink_dir(graph_id)
+    ensure_private_dir(base_dir)
+    ensure_private_dir(base_dir / "raw")
+    ensure_private_dir(base_dir / "processed")
 
-        with connect_db() as db:
-            sink = load_sink(db, sink_id)
-            if not sink:
-                return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data graph not found."
-                )
-            existing_rows = read_all_rows(db, sink_id)
-            try:
-                validate_rows(config, existing_rows)
-            except ValueError as error:
-                return self.send_error_json(HTTPStatus.BAD_REQUEST, str(error))
-            updated_at = now_iso()
-            db.execute(
-                "UPDATE data_sinks SET name = ?, config_json = ?, updated_at = ? WHERE id = ?",
-                (config["name"], json_dumps(config), updated_at, sink_id),
-            )
-            updated_sink = load_sink(db, sink_id)
-            write_artifact(db, updated_sink, existing_rows)
-            db.commit()
-
-        return self.send_json(
-            {"dataGraphId": sink_id, "viewUrl": public_url(f"/clusters/{sink_id}")}
-        )
-
-    def clear_data(self, sink_id):
-        cancel_scheduled_rebuild(sink_id)
-        with connect_db() as db:
-            sink = load_sink(db, sink_id)
-            if not sink:
-                return self.send_error_json(
-                    HTTPStatus.NOT_FOUND, "Data graph not found."
-                )
-
-            raw_paths = [
-                Path(row["raw_path"]).resolve()
-                for row in db.execute(
-                    "SELECT raw_path FROM data_batches WHERE sink_id = ?", (sink_id,)
-                ).fetchall()
-            ]
-            artifact_paths = [
-                Path(row["artifact_path"]).resolve()
-                for row in db.execute(
-                    "SELECT artifact_path FROM artifacts WHERE sink_id = ?", (sink_id,)
-                ).fetchall()
-            ]
-
-            for path in raw_paths + artifact_paths:
-                if DATA_ROOT in path.parents and path.exists():
-                    path.unlink()
-
-            db.execute("DELETE FROM data_batches WHERE sink_id = ?", (sink_id,))
-            db.execute("DELETE FROM artifacts WHERE sink_id = ?", (sink_id,))
-            artifact_path = write_artifact(db, sink, [])
-            db.commit()
-
-        return self.send_json(
-            {
-                "dataGraphId": sink_id,
-                "cleared": True,
-                "rowCount": 0,
-                "artifactPath": artifact_path.name,
-                "viewUrl": public_url(f"/clusters/{sink_id}"),
-            }
-        )
-
-    def persist_batch(self, db, sink, rows):
-        batch_id = new_id("batch")
-        batch_path = sink_dir(sink["id"]) / "raw" / f"{batch_id}.json"
-        batch_path.write_text(pretty_json({"data": rows}))
-        created_at = now_iso()
+    with connect_db() as db:
         db.execute(
-            "INSERT INTO data_batches (id, sink_id, raw_path, row_count, created_at) VALUES (?, ?, ?, ?, ?)",
-            (batch_id, sink["id"], str(batch_path), len(rows), created_at),
+            """
+            INSERT INTO data_sinks (id, name, config_json, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                graph_id,
+                config["name"],
+                json_dumps(config),
+                "created",
+                created_at,
+                created_at,
+            ),
         )
-        return batch_id
+        sink = load_sink(db, graph_id)
+        if rows:
+            persist_batch(db, sink, rows)
+            mark_sink_processing(db, graph_id)
+        db.commit()
+    if rows:
+        schedule_artifact_rebuild(graph_id)
 
-    def read_json_body(self):
-        content_type = self.headers.get("Content-Type", "")
-        if "application/json" not in content_type:
-            raise ValueError("Content-Type must be application/json.")
+    return {
+        "dataGraphId": graph_id,
+        "viewUrl": public_url(f"/clusters/{graph_id}"),
+        "ingestUrl": public_url(f"/api/data-graph/{graph_id}/data"),
+        "latestArtifactUrl": public_url(f"/api/data-graph/{graph_id}/artifact/latest"),
+    }
+
+
+@app.get("/api/data-graph/{graph_id}", dependencies=[Depends(require_auth)])
+def get_data_graph(graph_id: str):
+    if not ID_PATTERN.match(graph_id):
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    with connect_db() as db:
+        sink = load_sink(db, graph_id)
+    if not sink:
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    return sink
+
+
+@app.get("/api/data-graph/{graph_id}/status", dependencies=[Depends(require_auth)])
+def get_data_graph_status(graph_id: str):
+    if not ID_PATTERN.match(graph_id):
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    return get_data_graph_status_payload(graph_id)
+
+
+@app.get("/api/data-graph/{graph_id}/help", dependencies=[Depends(require_auth)])
+def get_data_graph_help(graph_id: str):
+    if not ID_PATTERN.match(graph_id):
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    with connect_db() as db:
+        sink = load_sink(db, graph_id)
+    if not sink:
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    return sink_help_payload(sink)
+
+
+@app.get("/api/data-graph/{graph_id}/artifact/latest", dependencies=[Depends(require_auth)])
+def get_latest_artifact(graph_id: str):
+    if not ID_PATTERN.match(graph_id):
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    with connect_db() as db:
+        sink = load_sink(db, graph_id)
+    if not sink:
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    if not sink["latestArtifactPath"]:
+        return {"config": sink["config"], "data": []}
+    artifact_path = Path(sink["latestArtifactPath"]).resolve()
+    if DATA_ROOT not in artifact_path.parents or not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return json.loads(artifact_path.read_text())
+
+
+@app.post(
+    "/api/data-graph/{graph_id}/data",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_auth)],
+)
+def append_rows(graph_id: str, payload: dict = Body(...)):
+    if not ID_PATTERN.match(graph_id):
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    with connect_db() as db:
+        sink = load_sink(db, graph_id)
+        if not sink:
+            raise HTTPException(status_code=404, detail="Data graph not found.")
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            rows = validate_rows(sink["config"], payload.get("data"))
         except ValueError as error:
-            raise ValueError("Invalid Content-Length.") from error
-        if length <= 0:
-            raise ValueError("Request body is required.")
-        if length > MAX_BODY_BYTES:
-            raise ValueError("Request body is too large.")
-        body = self.rfile.read(length)
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+        batch_id = persist_batch(db, sink, rows)
+        mark_sink_processing(db, graph_id)
+        db.commit()
+    schedule_artifact_rebuild(graph_id)
+
+    return {
+        "dataGraphId": graph_id,
+        "batchId": batch_id,
+        "rowCount": len(rows),
+        "status": "processing",
+        "processAfterSeconds": PROCESS_DEBOUNCE_SECONDS,
+        "viewUrl": public_url(f"/clusters/{graph_id}"),
+    }
+
+
+@app.patch("/api/data-graph/{graph_id}/schema", dependencies=[Depends(require_auth)])
+def update_schema(graph_id: str, payload: dict = Body(...)):
+    if not ID_PATTERN.match(graph_id):
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    try:
+        config = validate_config(payload.get("config"))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    with connect_db() as db:
+        sink = load_sink(db, graph_id)
+        if not sink:
+            raise HTTPException(status_code=404, detail="Data graph not found.")
+        existing_rows = read_all_rows(db, graph_id)
         try:
-            return json.loads(body)
-        except json.JSONDecodeError as error:
-            raise ValueError(f"Invalid JSON: {error.msg}.") from error
+            validate_rows(config, existing_rows)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        updated_at = now_iso()
+        db.execute(
+            "UPDATE data_sinks SET name = ?, config_json = ?, updated_at = ? WHERE id = ?",
+            (config["name"], json_dumps(config), updated_at, graph_id),
+        )
+        updated_sink = load_sink(db, graph_id)
+        write_artifact(db, updated_sink, process_records(updated_sink, existing_rows))
+        db.commit()
 
-    def require_auth(self):
-        expected = os.environ.get("DATA_GRAPH_API_TOKEN")
-        if not expected:
-            self.send_error_json(
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                "DATA_GRAPH_API_TOKEN is required before write APIs can be used.",
-            )
-            return False
-        header = self.headers.get("Authorization", "")
-        if not header.startswith("Bearer "):
-            self.send_error_json(
-                HTTPStatus.UNAUTHORIZED, "Authorization must use a bearer token."
-            )
-            return False
-        provided = header.removeprefix("Bearer ").strip()
-        if not hmac.compare_digest(provided, expected):
-            self.send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid bearer token.")
-            return False
-        return True
+    return {"dataGraphId": graph_id, "viewUrl": public_url(f"/clusters/{graph_id}")}
 
-    def serve_index(self):
-        index_path = Path(self.directory) / "index.html"
-        if not index_path.exists():
-            return self.send_error_json(
-                HTTPStatus.NOT_FOUND,
-                "Build the frontend first with npm run build.",
-            )
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(index_path.read_bytes())
 
-    def send_json(self, payload, status=HTTPStatus.OK):
-        body = pretty_json(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+@app.delete("/api/data-graph/{graph_id}/data", dependencies=[Depends(require_auth)])
+def clear_rows(graph_id: str):
+    if not ID_PATTERN.match(graph_id):
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    cancel_scheduled_rebuild(graph_id)
+    with connect_db() as db:
+        sink = load_sink(db, graph_id)
+        if not sink:
+            raise HTTPException(status_code=404, detail="Data graph not found.")
 
-    def send_error_json(self, status, message):
-        self.send_json({"error": message}, status)
+        raw_paths = [
+            Path(row["raw_path"]).resolve()
+            for row in db.execute(
+                "SELECT raw_path FROM data_batches WHERE sink_id = ?", (graph_id,)
+            ).fetchall()
+        ]
+        artifact_paths = [
+            Path(row["artifact_path"]).resolve()
+            for row in db.execute(
+                "SELECT artifact_path FROM artifacts WHERE sink_id = ?", (graph_id,)
+            ).fetchall()
+        ]
+
+        for path in raw_paths + artifact_paths:
+            if DATA_ROOT in path.parents and path.exists():
+                path.unlink()
+
+        db.execute("DELETE FROM data_batches WHERE sink_id = ?", (graph_id,))
+        db.execute("DELETE FROM artifacts WHERE sink_id = ?", (graph_id,))
+        artifact_path = write_artifact(db, sink, [])
+        db.commit()
+
+    return {
+        "dataGraphId": graph_id,
+        "cleared": True,
+        "rowCount": 0,
+        "artifactPath": artifact_path.name,
+        "viewUrl": public_url(f"/clusters/{graph_id}"),
+    }
+
+
+def index_file():
+    path = PUBLIC_ROOT / "index.html"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Build the frontend first with npm run build.")
+    return path
+
+
+@app.get("/clusters/{graph_id}")
+def serve_cluster(graph_id: str):
+    return FileResponse(index_file(), media_type="text/html")
+
+
+@app.get("/")
+def serve_root():
+    return FileResponse(index_file(), media_type="text/html")
+
+
+if (PUBLIC_ROOT / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=PUBLIC_ROOT / "assets"), name="assets")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run the local Data Graph API and static server."
+        description="Run the local Data Graph API and FastAPI server."
     )
     parser.add_argument(
         "--host", default=os.environ.get("DATA_GRAPH_HOST", "127.0.0.1")
@@ -864,17 +860,18 @@ def main():
     )
     args = parser.parse_args()
 
-    init_storage()
-    httpd = ThreadingHTTPServer((args.host, args.port), DataGraphHandler)
     print(f"Data Graph local server: http://{args.host}:{args.port}")
     print(f"SQLite: {DB_PATH}")
     print(f"Storage: {DATA_ROOT}")
     if not os.environ.get("DATA_GRAPH_API_TOKEN"):
         print(
-            "DATA_GRAPH_API_TOKEN is not set; write APIs will reject requests.",
+            "DATA_GRAPH_API_TOKEN is not set; APIs will reject requests.",
             file=sys.stderr,
         )
-    httpd.serve_forever()
+
+    import uvicorn
+
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

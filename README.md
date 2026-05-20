@@ -1,15 +1,20 @@
 # Data Graph
 
-Local-first data graph service for creating data graphs, ingesting JSON rows, and
-viewing grouped records in the browser.
+Local-first FastAPI data graph service for creating data graphs, ingesting JSON
+rows, and viewing grouped records in the browser.
 
 The local deployment uses SQLite for metadata and the filesystem for raw batches
 and processed artifacts.
+
+Ingested rows are processed with PaCMAP for 2D layout and HDBSCAN for cluster
+labels after the debounce window.
 
 ## Start
 
 ```sh
 npm install
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 npm run build
 printf "DATA_GRAPH_API_TOKEN=%s\n" "$(openssl rand -hex 32)" > .env
 npm run serve
