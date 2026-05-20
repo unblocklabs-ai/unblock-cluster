@@ -322,7 +322,9 @@ def api_help_payload():
         "browserAuth": {
             "tokenQueryParam": "token",
             "viewUrlTemplate": public_url("/clusters/:id?token=<token>"),
+            "agentInstruction": "Agents may place the same bearer token in the browser URL as the token query parameter when sharing/opening a private cluster view.",
             "behavior": "The browser stores the token in sessionStorage, removes it from the visible URL, and uses it as the Authorization bearer token for private API requests.",
+            "securityNote": "This convenience is intended for a small private deployment. Treat tokenized URLs as secrets.",
         },
         "types": sorted(SUPPORTED_TYPES),
         "endpoints": {
@@ -442,7 +444,9 @@ def sink_help_payload(sink):
         "browserViewUrl": public_url(f"/clusters/{sink['id']}?token=<token>"),
         "browserAuth": {
             "tokenQueryParam": "token",
+            "agentInstruction": "Use the same bearer token from the Authorization header as the token query parameter when opening browserViewUrl.",
             "behavior": "Open browserViewUrl with the bearer token once. The UI stores it in sessionStorage, removes it from the visible URL, and uses it for private API fetches.",
+            "securityNote": "This convenience is intended for a small private deployment. Treat tokenized URLs as secrets.",
         },
     }
 

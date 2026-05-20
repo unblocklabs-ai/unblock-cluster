@@ -154,6 +154,10 @@ http://127.0.0.1:8080/clusters/ds_REPLACE_ME?token=YOUR_TOKEN
 The browser stores the token in `sessionStorage` and removes it from the visible
 URL after the first load.
 
+Agents may use the same bearer token as the `token` query parameter when
+constructing a private browser URL for this small deployment. Treat tokenized
+URLs as secrets.
+
 ## Security Notes
 
 - All `/api/*` endpoints require `Authorization: Bearer <token>`.
