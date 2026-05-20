@@ -319,6 +319,11 @@ def api_help_payload():
                 "DELETE /api/data-sink/:id/data",
             ],
         },
+        "browserAuth": {
+            "tokenQueryParam": "token",
+            "viewUrlTemplate": public_url("/clusters/:id?token=<token>"),
+            "behavior": "The browser stores the token in sessionStorage, removes it from the visible URL, and uses it as the Authorization bearer token for private API requests.",
+        },
         "types": sorted(SUPPORTED_TYPES),
         "endpoints": {
             "status": "GET /api/status",
@@ -434,6 +439,11 @@ def sink_help_payload(sink):
             "authRequired": True,
         },
         "viewUrl": public_url(f"/clusters/{sink['id']}"),
+        "browserViewUrl": public_url(f"/clusters/{sink['id']}?token=<token>"),
+        "browserAuth": {
+            "tokenQueryParam": "token",
+            "behavior": "Open browserViewUrl with the bearer token once. The UI stores it in sessionStorage, removes it from the visible URL, and uses it for private API fetches.",
+        },
     }
 
 
