@@ -7,7 +7,7 @@ import re
 import secrets
 import sqlite3
 import sys
-from cmath import exp
+import threading
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -16,14 +16,6 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = Path(os.environ.get("DATA_GRAPH_ENV", ROOT / ".env")).resolve()
-DATA_ROOT = Path(os.environ.get("DATA_GRAPH_STORAGE", ROOT / "local-data")).resolve()
-DB_PATH = Path(
-    os.environ.get("DATA_GRAPH_DB", DATA_ROOT / "data-graph.sqlite3")
-).resolve()
-PUBLIC_ROOT = Path(os.environ.get("DATA_GRAPH_PUBLIC_ROOT", ROOT / "dist")).resolve()
-MAX_BODY_BYTES = int(os.environ.get("DATA_GRAPH_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
-SUPPORTED_TYPES = {"String", "Number", "Boolean", "Object", "Array"}
-ID_PATTERN = re.compile(r"^ds_[A-Za-z0-9_-]{16,64}$")
 
 
 def load_env_file(path=ENV_PATH):
@@ -38,6 +30,21 @@ def load_env_file(path=ENV_PATH):
         value = value.strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = value
+
+
+load_env_file()
+
+DATA_ROOT = Path(os.environ.get("DATA_GRAPH_STORAGE", ROOT / "local-data")).resolve()
+DB_PATH = Path(
+    os.environ.get("DATA_GRAPH_DB", DATA_ROOT / "data-graph.sqlite3")
+).resolve()
+PUBLIC_ROOT = Path(os.environ.get("DATA_GRAPH_PUBLIC_ROOT", ROOT / "dist")).resolve()
+MAX_BODY_BYTES = int(os.environ.get("DATA_GRAPH_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
+PROCESS_DEBOUNCE_SECONDS = float(os.environ.get("DATA_GRAPH_PROCESS_DEBOUNCE_SECONDS", "2.0"))
+SUPPORTED_TYPES = {"String", "Number", "Boolean", "Object", "Array"}
+ID_PATTERN = re.compile(r"^ds_[A-Za-z0-9_-]{16,64}$")
+PROCESS_TIMERS = {}
+PROCESS_TIMERS_LOCK = threading.Lock()
 
 
 def now_iso():
@@ -238,6 +245,52 @@ def write_artifact(db, sink, data):
     return artifact_path
 
 
+def mark_sink_processing(db, sink_id):
+    db.execute(
+        "UPDATE data_sinks SET status = ?, updated_at = ? WHERE id = ?",
+        ("processing", now_iso(), sink_id),
+    )
+
+
+def schedule_artifact_rebuild(sink_id):
+    cancel_scheduled_rebuild(sink_id)
+    timer = threading.Timer(PROCESS_DEBOUNCE_SECONDS, process_pending_sink, args=(sink_id,))
+    timer.daemon = True
+    with PROCESS_TIMERS_LOCK:
+        PROCESS_TIMERS[sink_id] = timer
+    timer.start()
+
+
+def cancel_scheduled_rebuild(sink_id):
+    with PROCESS_TIMERS_LOCK:
+        timer = PROCESS_TIMERS.pop(sink_id, None)
+    if timer:
+        timer.cancel()
+
+
+def process_pending_sink(sink_id):
+    with PROCESS_TIMERS_LOCK:
+        PROCESS_TIMERS.pop(sink_id, None)
+    try:
+        with connect_db() as db:
+            sink = load_sink(db, sink_id)
+            if not sink:
+                return
+            write_artifact(db, sink, read_all_rows(db, sink_id))
+            db.commit()
+    except Exception as error:
+        print(f"Failed to process {sink_id}: {error}", file=sys.stderr)
+        try:
+            with connect_db() as db:
+                db.execute(
+                    "UPDATE data_sinks SET status = ?, updated_at = ? WHERE id = ?",
+                    ("error", now_iso(), sink_id),
+                )
+                db.commit()
+        except Exception as nested_error:
+            print(f"Failed to mark {sink_id} as error: {nested_error}", file=sys.stderr)
+
+
 class DataGraphHandler(SimpleHTTPRequestHandler):
     server_version = "DataGraphLocal/0.1"
 
@@ -349,8 +402,10 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             sink = load_sink(db, sink_id)
             if rows:
                 self.persist_batch(db, sink, rows)
-                write_artifact(db, sink, read_all_rows(db, sink_id))
+                mark_sink_processing(db, sink_id)
             db.commit()
+        if rows:
+            schedule_artifact_rebuild(sink_id)
 
         return self.send_json(
             {
@@ -377,15 +432,17 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
                 return self.send_error_json(HTTPStatus.BAD_REQUEST, str(error))
 
             batch_id = self.persist_batch(db, sink, rows)
-            artifact_path = write_artifact(db, sink, read_all_rows(db, sink_id))
+            mark_sink_processing(db, sink_id)
             db.commit()
+        schedule_artifact_rebuild(sink_id)
 
         return self.send_json(
             {
                 "dataSinkId": sink_id,
                 "batchId": batch_id,
                 "rowCount": len(rows),
-                "artifactPath": artifact_path.name,
+                "status": "processing",
+                "processAfterSeconds": PROCESS_DEBOUNCE_SECONDS,
                 "viewUrl": f"/clusters/{sink_id}",
             },
             HTTPStatus.CREATED,
@@ -427,6 +484,7 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
     def clear_data(self, sink_id):
         if not self.require_auth():
             return
+        cancel_scheduled_rebuild(sink_id)
         with connect_db() as db:
             sink = load_sink(db, sink_id)
             if not sink:
@@ -510,7 +568,6 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             )
             return False
         provided = header.removeprefix("Bearer ").strip()
-        print(f"expected={expected}, provided={provided}")
         if not hmac.compare_digest(provided, expected):
             self.send_error_json(HTTPStatus.UNAUTHORIZED, "Invalid bearer token.")
             return False
@@ -541,7 +598,6 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
 
 def main():
-    load_env_file()
     parser = argparse.ArgumentParser(
         description="Run the local Data Graph API and static server."
     )

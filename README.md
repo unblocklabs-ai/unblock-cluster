@@ -27,6 +27,7 @@ DATA_GRAPH_PUBLIC_ROOT=/path/to/dist
 DATA_GRAPH_HOST=127.0.0.1
 DATA_GRAPH_PORT=8080
 DATA_GRAPH_MAX_BODY_BYTES=8388608
+DATA_GRAPH_PROCESS_DEBOUNCE_SECONDS=2.0
 ```
 
 The server loads `.env` from the project root automatically. Set
@@ -67,6 +68,10 @@ The response includes:
 
 ## Ingest Data
 
+Ingested rows are appended immediately as a raw batch. The latest view artifact is
+rebuilt after a short debounce window, so multiple quick append requests are
+processed together.
+
 ```sh
 curl -X POST http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/data \
   -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
@@ -80,6 +85,15 @@ curl -X POST http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/data \
       }
     ]
   }'
+```
+
+The response includes `status: "processing"` and `processAfterSeconds`. Wait for
+that window, then refresh the cluster UI or fetch the latest artifact.
+
+To stress-test debounced parallel appends:
+
+```sh
+PARALLEL_REQUESTS=10 DEBOUNCE_WAIT_SECONDS=3 ./scripts/test_parallel_ingest.sh
 ```
 
 ## Clear Data
