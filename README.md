@@ -37,6 +37,22 @@ The server loads `.env` from the project root automatically. Set
 Set `DATA_GRAPH_PUBLIC_BASE_URL` to your Cloudflare Tunnel URL so API responses
 and agent help endpoints return full public URLs.
 
+## Persistent Run
+
+Use the service wrapper to run Data Graph in the background with a PID file and
+logs:
+
+```sh
+./scripts/data_graph_service.sh start
+./scripts/data_graph_service.sh status
+./scripts/data_graph_service.sh logs
+./scripts/data_graph_service.sh restart
+./scripts/data_graph_service.sh stop
+```
+
+Runtime logs are written under `local-data/runtime/` by default. Set
+`DATA_GRAPH_RUNTIME_DIR=/path/to/runtime` to override that location.
+
 ## Create A Data Sink
 
 Agents can discover the API shape first:
@@ -132,8 +148,11 @@ curl -X DELETE http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/data \
 Open the cluster UI at:
 
 ```txt
-http://127.0.0.1:8080/clusters/ds_REPLACE_ME
+http://127.0.0.1:8080/clusters/ds_REPLACE_ME?token=YOUR_TOKEN
 ```
+
+The browser stores the token in `sessionStorage` and removes it from the visible
+URL after the first load.
 
 ## Security Notes
 

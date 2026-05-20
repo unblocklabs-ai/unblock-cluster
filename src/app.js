@@ -57,10 +57,16 @@ const els = {
 async function loadDataset() {
   try {
     const sinkId = dataSinkIdFromPath();
+    const token = tokenFromUrl() || sessionStorage.getItem("dataGraphApiToken");
     const datasetUrl = sinkId
       ? `/api/data-sink/${encodeURIComponent(sinkId)}/artifact/latest`
       : "./sample-data/commerce.json";
-    const response = await fetch(datasetUrl);
+    if (sinkId && !token) {
+      throw new Error("Missing API token. Open this cluster with ?token=YOUR_TOKEN.");
+    }
+    const response = await fetch(datasetUrl, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
     if (!response.ok)
       throw new Error(`Could not load dataset: ${response.status}`);
     const dataset = await response.json();
@@ -68,6 +74,16 @@ async function loadDataset() {
   } catch (error) {
     showLoadError(error);
   }
+}
+
+function tokenFromUrl() {
+  const url = new URL(window.location.href);
+  const token = url.searchParams.get("token");
+  if (!token) return null;
+  sessionStorage.setItem("dataGraphApiToken", token);
+  url.searchParams.delete("token");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  return token;
 }
 
 function dataSinkIdFromPath() {
@@ -101,7 +117,7 @@ function loadRecords(payload) {
 
 function showLoadError(error) {
   els.viewTitle.textContent = "Dataset could not load";
-  els.viewSubtitle.textContent = error.message;
+  if (els.viewSubtitle) els.viewSubtitle.textContent = error.message;
   els.stats.innerHTML = "";
   els.legend.innerHTML = "";
   els.emptyState.classList.remove("hidden");
