@@ -42,8 +42,11 @@ and agent help endpoints return full public URLs.
 Agents can discover the API shape first:
 
 ```sh
-curl http://127.0.0.1:8080/api/help
-curl http://127.0.0.1:8080/api/status
+curl -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
+  http://127.0.0.1:8080/api/help
+
+curl -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
+  http://127.0.0.1:8080/api/status
 ```
 
 ```sh
@@ -104,8 +107,11 @@ that window, then refresh the cluster UI or fetch the latest artifact.
 Agents can inspect the exact expected schema and current processing state:
 
 ```sh
-curl http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/help
-curl http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/status
+curl -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
+  http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/help
+
+curl -H "Authorization: Bearer $DATA_GRAPH_API_TOKEN" \
+  http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/status
 ```
 
 To stress-test debounced parallel appends:
@@ -131,7 +137,7 @@ http://127.0.0.1:8080/clusters/ds_REPLACE_ME
 
 ## Security Notes
 
-- Write endpoints require `Authorization: Bearer <token>`.
+- All `/api/*` endpoints require `Authorization: Bearer <token>`.
 - The server binds to localhost by default. Put a reverse proxy with TLS in front
   of it before exposing it outside the Mac mini.
 - Keep `local-data/` outside web roots and backed up.

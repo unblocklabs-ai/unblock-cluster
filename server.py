@@ -472,6 +472,8 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
+            if not self.require_auth():
+                return
             return self.handle_api_get(parsed.path)
         if parsed.path.startswith("/clusters/"):
             return self.serve_index()
@@ -479,6 +481,8 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/") and not self.require_auth():
+            return
         if parsed.path == "/api/data-sink":
             return self.create_sink()
         match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/data", parsed.path)
@@ -488,6 +492,8 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
     def do_PATCH(self):
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/") and not self.require_auth():
+            return
         match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/schema", parsed.path)
         if match:
             return self.update_schema(match.group(1))
@@ -495,6 +501,8 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/") and not self.require_auth():
+            return
         match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/data", parsed.path)
         if match:
             return self.clear_data(match.group(1))
@@ -590,8 +598,6 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         return self.send_json(sink_help_payload(sink))
 
     def create_sink(self):
-        if not self.require_auth():
-            return
         try:
             payload = self.read_json_body()
             config = validate_config(payload.get("config"))
@@ -640,8 +646,6 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         )
 
     def ingest_data(self, sink_id):
-        if not self.require_auth():
-            return
         with connect_db() as db:
             sink = load_sink(db, sink_id)
             if not sink:
@@ -672,8 +676,6 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         )
 
     def update_schema(self, sink_id):
-        if not self.require_auth():
-            return
         try:
             payload = self.read_json_body()
             config = validate_config(payload.get("config"))
@@ -705,8 +707,6 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         )
 
     def clear_data(self, sink_id):
-        if not self.require_auth():
-            return
         cancel_scheduled_rebuild(sink_id)
         with connect_db() as db:
             sink = load_sink(db, sink_id)
