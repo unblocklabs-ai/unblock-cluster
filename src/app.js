@@ -56,7 +56,11 @@ const els = {
 
 async function loadDataset() {
   try {
-    const response = await fetch("./sample-data/commerce.json");
+    const sinkId = dataSinkIdFromPath();
+    const datasetUrl = sinkId
+      ? `/api/data-sink/${encodeURIComponent(sinkId)}/artifact/latest`
+      : "./sample-data/commerce.json";
+    const response = await fetch(datasetUrl);
     if (!response.ok)
       throw new Error(`Could not load dataset: ${response.status}`);
     const dataset = await response.json();
@@ -64,6 +68,11 @@ async function loadDataset() {
   } catch (error) {
     showLoadError(error);
   }
+}
+
+function dataSinkIdFromPath() {
+  const match = window.location.pathname.match(/^\/clusters\/([^/]+)$/);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
 function loadRecords(payload) {

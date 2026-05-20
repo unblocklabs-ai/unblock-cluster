@@ -2,3 +2,7 @@ node_modules/
 dist/
 .venv
 raw-data
+local-data/
+.env
+__pycache__/
+sample-data/

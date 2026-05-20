@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173",
-    "process:data": ".venv/bin/python scripts/preprocess_dataset.py",
-    "check": "node --check src/app.js"
+    "build": "vite build",
+    "serve": "python3 server.py",
+    "check": "node --check src/app.js && python3 -m py_compile server.py"
   },
   "dependencies": {
     "@vitejs/plugin-basic-ssl": "^2.3.0",
