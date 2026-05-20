@@ -268,6 +268,12 @@ def cancel_scheduled_rebuild(sink_id):
         timer.cancel()
 
 
+def is_rebuild_scheduled(sink_id):
+    with PROCESS_TIMERS_LOCK:
+        timer = PROCESS_TIMERS.get(sink_id)
+    return bool(timer and timer.is_alive())
+
+
 def process_pending_sink(sink_id):
     with PROCESS_TIMERS_LOCK:
         PROCESS_TIMERS.pop(sink_id, None)
@@ -289,6 +295,155 @@ def process_pending_sink(sink_id):
                 db.commit()
         except Exception as nested_error:
             print(f"Failed to mark {sink_id} as error: {nested_error}", file=sys.stderr)
+
+
+def api_help_payload():
+    return {
+        "service": "Data Graph",
+        "description": "Create a data graph, append JSON rows, and view grouped records.",
+        "auth": {
+            "type": "bearer",
+            "header": "Authorization: Bearer <token>",
+            "requiredFor": [
+                "POST /api/data-sink",
+                "POST /api/data-sink/:id/data",
+                "PATCH /api/data-sink/:id/schema",
+                "DELETE /api/data-sink/:id/data",
+            ],
+        },
+        "types": sorted(SUPPORTED_TYPES),
+        "endpoints": {
+            "status": "GET /api/status",
+            "createDataGraph": "POST /api/data-sink",
+            "getDataGraph": "GET /api/data-sink/:id",
+            "getDataGraphStatus": "GET /api/data-sink/:id/status",
+            "getDataGraphHelp": "GET /api/data-sink/:id/help",
+            "appendRows": "POST /api/data-sink/:id/data",
+            "clearRows": "DELETE /api/data-sink/:id/data",
+            "latestArtifact": "GET /api/data-sink/:id/artifact/latest",
+            "view": "GET /clusters/:id",
+        },
+        "createRequest": {
+            "config": {
+                "name": "Book Clusters",
+                "dataSchema": {
+                    "bookName": "String",
+                    "genre": "String",
+                    "summary": "String",
+                },
+                "groupingFields": ["genre"],
+                "titleField": "bookName",
+                "detailField": "summary",
+            },
+            "data": [
+                {
+                    "bookName": "Dune",
+                    "genre": "Science Fiction",
+                    "summary": "A desert planet power struggle.",
+                }
+            ],
+        },
+        "appendRequest": {
+            "data": [
+                {
+                    "bookName": "Dune",
+                    "genre": "Science Fiction",
+                    "summary": "A desert planet power struggle.",
+                }
+            ]
+        },
+        "notes": [
+            "Every grouping field must exist in config.dataSchema.",
+            "titleField and detailField are optional, but must exist in config.dataSchema when provided.",
+            "POST /api/data-sink/:id/data appends rows; it does not overwrite existing rows.",
+            "Appended rows are processed after a debounce window so rapid requests are batched.",
+            "Use GET /api/data-sink/:id/status to check processing state and row counts.",
+        ],
+    }
+
+
+def system_status_payload():
+    with connect_db() as db:
+        sink_count = db.execute("SELECT COUNT(*) FROM data_sinks").fetchone()[0]
+        batch_count = db.execute("SELECT COUNT(*) FROM data_batches").fetchone()[0]
+        row_count = db.execute("SELECT COALESCE(SUM(row_count), 0) FROM data_batches").fetchone()[0]
+        artifact_count = db.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+    with PROCESS_TIMERS_LOCK:
+        scheduled = sorted(PROCESS_TIMERS.keys())
+    return {
+        "ok": True,
+        "service": "Data Graph",
+        "time": now_iso(),
+        "storage": "filesystem",
+        "database": "sqlite",
+        "dataSinkCount": sink_count,
+        "batchCount": batch_count,
+        "rowCount": row_count,
+        "artifactCount": artifact_count,
+        "scheduledProcessingCount": len(scheduled),
+        "scheduledDataSinkIds": scheduled,
+        "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
+        "maxBodyBytes": MAX_BODY_BYTES,
+    }
+
+
+def sink_help_payload(sink):
+    config = sink["config"]
+    sample_row = sample_row_for_schema(config["dataSchema"])
+    return {
+        "dataSinkId": sink["id"],
+        "name": sink["name"],
+        "status": sink["status"],
+        "schema": config["dataSchema"],
+        "groupingFields": config["groupingFields"],
+        "titleField": config.get("titleField"),
+        "detailField": config.get("detailField"),
+        "auth": {
+            "type": "bearer",
+            "header": "Authorization: Bearer <token>",
+            "requiredForAppend": True,
+        },
+        "append": {
+            "method": "POST",
+            "url": f"/api/data-sink/{sink['id']}/data",
+            "contentType": "application/json",
+            "body": {"data": [sample_row]},
+            "behavior": "Rows are appended immediately, then the latest artifact is rebuilt after the debounce window.",
+            "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
+        },
+        "statusCheck": {
+            "method": "GET",
+            "url": f"/api/data-sink/{sink['id']}/status",
+        },
+        "latestArtifact": {
+            "method": "GET",
+            "url": f"/api/data-sink/{sink['id']}/artifact/latest",
+        },
+        "clearRows": {
+            "method": "DELETE",
+            "url": f"/api/data-sink/{sink['id']}/data",
+            "authRequired": True,
+        },
+        "viewUrl": f"/clusters/{sink['id']}",
+    }
+
+
+def sample_row_for_schema(schema):
+    return {field: sample_value_for_type(field_type) for field, field_type in schema.items()}
+
+
+def sample_value_for_type(field_type):
+    if field_type == "String":
+        return "example"
+    if field_type == "Number":
+        return 1
+    if field_type == "Boolean":
+        return True
+    if field_type == "Object":
+        return {"example": True}
+    if field_type == "Array":
+        return ["example"]
+    return None
 
 
 class DataGraphHandler(SimpleHTTPRequestHandler):
@@ -337,6 +492,12 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
         return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
 
     def handle_api_get(self, path):
+        if path in ("/api/help", "/api"):
+            return self.send_json(api_help_payload())
+
+        if path == "/api/status":
+            return self.send_json(system_status_payload())
+
         match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)$", path)
         if match:
             with connect_db() as db:
@@ -346,6 +507,14 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.NOT_FOUND, "Data sink not found."
                 )
             return self.send_json(sink)
+
+        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/status", path)
+        if match:
+            return self.send_sink_status(match.group(1))
+
+        match = re.fullmatch(r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/help", path)
+        if match:
+            return self.send_sink_help(match.group(1))
 
         match = re.fullmatch(
             r"/api/data-sink/(ds_[A-Za-z0-9_-]+)/artifact/latest", path
@@ -365,6 +534,49 @@ class DataGraphHandler(SimpleHTTPRequestHandler):
             return self.send_json(json.loads(artifact_path.read_text()))
 
         return self.send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
+
+    def send_sink_status(self, sink_id):
+        with connect_db() as db:
+            sink = load_sink(db, sink_id)
+            if not sink:
+                return self.send_error_json(
+                    HTTPStatus.NOT_FOUND, "Data sink not found."
+                )
+            batch_count = db.execute(
+                "SELECT COUNT(*) FROM data_batches WHERE sink_id = ?", (sink_id,)
+            ).fetchone()[0]
+            row_count = db.execute(
+                "SELECT COALESCE(SUM(row_count), 0) FROM data_batches WHERE sink_id = ?",
+                (sink_id,),
+            ).fetchone()[0]
+            artifact_count = db.execute(
+                "SELECT COUNT(*) FROM artifacts WHERE sink_id = ?", (sink_id,)
+            ).fetchone()[0]
+
+        return self.send_json(
+            {
+                "dataSinkId": sink_id,
+                "name": sink["name"],
+                "status": sink["status"],
+                "processingScheduled": is_rebuild_scheduled(sink_id),
+                "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
+                "batchCount": batch_count,
+                "rowCount": row_count,
+                "artifactCount": artifact_count,
+                "hasLatestArtifact": bool(sink["latestArtifactPath"]),
+                "viewUrl": f"/clusters/{sink_id}",
+                "ingestUrl": f"/api/data-sink/{sink_id}/data",
+                "latestArtifactUrl": f"/api/data-sink/{sink_id}/artifact/latest",
+                "updatedAt": sink["updatedAt"],
+            }
+        )
+
+    def send_sink_help(self, sink_id):
+        with connect_db() as db:
+            sink = load_sink(db, sink_id)
+        if not sink:
+            return self.send_error_json(HTTPStatus.NOT_FOUND, "Data sink not found.")
+        return self.send_json(sink_help_payload(sink))
 
     def create_sink(self):
         if not self.require_auth():

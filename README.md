@@ -35,6 +35,13 @@ The server loads `.env` from the project root automatically. Set
 
 ## Create A Data Sink
 
+Agents can discover the API shape first:
+
+```sh
+curl http://127.0.0.1:8080/api/help
+curl http://127.0.0.1:8080/api/status
+```
+
 ```sh
 export DATA_GRAPH_API_TOKEN="$(grep '^DATA_GRAPH_API_TOKEN=' .env | cut -d= -f2-)"
 
@@ -89,6 +96,13 @@ curl -X POST http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/data \
 
 The response includes `status: "processing"` and `processAfterSeconds`. Wait for
 that window, then refresh the cluster UI or fetch the latest artifact.
+
+Agents can inspect the exact expected schema and current processing state:
+
+```sh
+curl http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/help
+curl http://127.0.0.1:8080/api/data-sink/ds_REPLACE_ME/status
+```
 
 To stress-test debounced parallel appends:
 
