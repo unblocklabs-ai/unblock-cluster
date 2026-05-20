@@ -326,20 +326,22 @@ textarea {
 
 .record-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 14px;
 }
 
 .record-card {
   display: grid;
-  grid-template-columns: 56px 1fr;
+  grid-template-columns: 52px minmax(0, 1fr);
   gap: 12px;
   align-items: center;
-  padding: 10px;
+  min-height: 86px;
+  padding: 12px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.66);
   cursor: pointer;
+  text-align: left;
 }
 
 .record-card:hover {
@@ -348,8 +350,8 @@ textarea {
 }
 
 .thumb {
-  width: 56px;
-  height: 56px;
+  width: 52px;
+  height: 52px;
   border-radius: 7px;
   object-fit: cover;
   background: #d9ddd8;
@@ -365,9 +367,34 @@ textarea {
   line-height: 1.2;
 }
 
+.record-card strong {
+  display: -webkit-box;
+  color: var(--ink);
+  font-size: 14px;
+  margin-bottom: 4px;
+  max-height: 2.4em;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .record-card span {
   color: var(--muted);
   font-size: 13px;
+}
+
+.record-card > span:last-child {
+  min-width: 0;
+}
+
+.record-card > span:last-child > span {
+  display: -webkit-box;
+  line-height: 1.32;
+  max-height: 2.64em;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .empty-state {
