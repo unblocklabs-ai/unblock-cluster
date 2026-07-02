@@ -15,7 +15,13 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, stat
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from processor import default_feature_fields, default_numeric_fields, process_records
+from processor import (
+    ProcessingError,
+    default_feature_fields,
+    default_numeric_fields,
+    process_records,
+    resolve_processor_options,
+)
 
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = Path(os.environ.get("DATA_GRAPH_ENV", ROOT / ".env")).resolve()
@@ -46,6 +52,30 @@ PUBLIC_BASE_URL = os.environ.get("DATA_GRAPH_PUBLIC_BASE_URL", "").rstrip("/")
 MAX_BODY_BYTES = int(os.environ.get("DATA_GRAPH_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 PROCESS_DEBOUNCE_SECONDS = float(os.environ.get("DATA_GRAPH_PROCESS_DEBOUNCE_SECONDS", "2.0"))
 SUPPORTED_TYPES = {"String", "Number", "Boolean", "Object", "Array"}
+CONFIG_KEYS = {
+    "name",
+    "description",
+    "source",
+    "dataSchema",
+    "groupingFields",
+    "titleField",
+    "detailField",
+    "imageField",
+    "cluster",
+}
+TEXT_FEATURE_METHODS = {"tfidf", "embedding"}
+EMBEDDING_PROVIDERS = {"openai"}
+CLUSTER_CONFIG_KEYS = {
+    "method",
+    "featureFields",
+    "numericFields",
+    "minClusterSize",
+    "textFeatureMethod",
+    "embeddingProvider",
+    "embeddingModel",
+    "embeddingDimensions",
+}
+SECRET_CONFIG_VALUE_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 ID_PATTERN = re.compile(r"^dg_[A-Za-z0-9_-]{16,64}$")
 PROCESS_TIMERS = {}
 PROCESS_TIMERS_LOCK = threading.Lock()
@@ -144,6 +174,12 @@ def pretty_json(value):
     return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
 
 
+def positive_int(value, field_name):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer.")
+    return value
+
+
 def ensure_private_dir(path):
     path.mkdir(parents=True, exist_ok=True)
     try:
@@ -187,6 +223,16 @@ def init_storage():
               artifact_path TEXT NOT NULL,
               kind TEXT NOT NULL,
               created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+              provider TEXT NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL DEFAULT 0,
+              text_hash TEXT NOT NULL,
+              embedding_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (provider, model, dimensions, text_hash)
             );
             """
         )
@@ -239,10 +285,20 @@ def new_id(prefix):
 def validate_config(config):
     if not isinstance(config, dict):
         raise ValueError("config must be an object.")
+    reject_secret_config_keys(config, "config")
+    reject_secret_config_values(config, "config")
+    unknown_keys = sorted(set(config) - CONFIG_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            "config contains unsupported fields: "
+            + ", ".join(unknown_keys)
+            + "."
+        )
 
     schema = config.get("dataSchema")
     if not isinstance(schema, dict) or not schema:
         raise ValueError("config.dataSchema must be a non-empty object.")
+    reject_secret_config_keys(schema, "config.dataSchema")
 
     for field, field_type in schema.items():
         if not isinstance(field, str) or not field:
@@ -261,21 +317,156 @@ def validate_config(config):
         if field not in schema:
             raise ValueError(f"Grouping field '{field}' does not exist in dataSchema.")
 
-    for optional_field in ("titleField", "detailField"):
+    for optional_field in ("titleField", "detailField", "imageField"):
         value = config.get(optional_field)
         if value is not None and value not in schema:
             raise ValueError(f"config.{optional_field} must exist in dataSchema.")
 
-    cluster = config.get("cluster")
-    if cluster is not None and not isinstance(cluster, dict):
-        raise ValueError("config.cluster must be an object when provided.")
+    for text_field in ("description", "source"):
+        value = config.get(text_field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"config.{text_field} must be a string.")
 
-    return {
-        **config,
+    cluster = validate_cluster_config(config.get("cluster"), schema)
+
+    normalized = {
         "name": str(config.get("name") or "Data Atlas")[:120],
         "dataSchema": schema,
         "groupingFields": grouping_fields,
+        "cluster": cluster,
     }
+    for optional_field in ("description", "source", "titleField", "detailField", "imageField"):
+        if optional_field in config:
+            normalized[optional_field] = config.get(optional_field)
+    return normalized
+
+
+def validate_cluster_config(cluster, schema):
+    if cluster is None:
+        return {}
+    if not isinstance(cluster, dict):
+        raise ValueError("config.cluster must be an object when provided.")
+    reject_secret_config_keys(cluster, "config.cluster")
+
+    normalized = dict(cluster)
+    unknown_keys = sorted(set(normalized) - CLUSTER_CONFIG_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            "config.cluster contains unsupported fields: "
+            + ", ".join(unknown_keys)
+            + "."
+        )
+
+    for field_name in ("featureFields", "numericFields"):
+        fields = normalized.get(field_name)
+        if fields is None:
+            continue
+        if not isinstance(fields, list) or not all(isinstance(field, str) for field in fields):
+            raise ValueError(f"config.cluster.{field_name} must be an array of field names.")
+        unknown = [field for field in fields if field not in schema]
+        if unknown:
+            raise ValueError(
+                f"config.cluster.{field_name} contains unknown fields: {', '.join(unknown)}."
+            )
+
+    if "numericFields" in normalized:
+        non_numeric = [
+            field
+            for field in normalized["numericFields"]
+            if schema.get(field) != "Number"
+        ]
+        if non_numeric:
+            raise ValueError(
+                "config.cluster.numericFields can only include Number fields: "
+                + ", ".join(non_numeric)
+                + "."
+            )
+
+    text_feature_method = normalized.get("textFeatureMethod")
+    if text_feature_method is not None:
+        if not isinstance(text_feature_method, str):
+            raise ValueError("config.cluster.textFeatureMethod must be a string.")
+        text_feature_method = text_feature_method.strip().lower()
+        if text_feature_method not in TEXT_FEATURE_METHODS:
+            raise ValueError(
+                "config.cluster.textFeatureMethod must be one of: "
+                + ", ".join(sorted(TEXT_FEATURE_METHODS))
+                + "."
+            )
+        normalized["textFeatureMethod"] = text_feature_method
+
+    embedding_provider = normalized.get("embeddingProvider")
+    if embedding_provider is not None:
+        if not isinstance(embedding_provider, str):
+            raise ValueError("config.cluster.embeddingProvider must be a string.")
+        embedding_provider = embedding_provider.strip().lower()
+        if embedding_provider not in EMBEDDING_PROVIDERS:
+            raise ValueError(
+                "config.cluster.embeddingProvider must be one of: "
+                + ", ".join(sorted(EMBEDDING_PROVIDERS))
+                + "."
+            )
+        normalized["embeddingProvider"] = embedding_provider
+
+    embedding_model = normalized.get("embeddingModel")
+    if embedding_model is not None:
+        if not isinstance(embedding_model, str) or not embedding_model.strip():
+            raise ValueError("config.cluster.embeddingModel must be a non-empty string.")
+        normalized["embeddingModel"] = embedding_model.strip()
+
+    if "embeddingDimensions" in normalized and normalized["embeddingDimensions"] is not None:
+        normalized["embeddingDimensions"] = positive_int(
+            normalized["embeddingDimensions"], "config.cluster.embeddingDimensions"
+        )
+
+    if "minClusterSize" in normalized and normalized["minClusterSize"] is not None:
+        normalized["minClusterSize"] = positive_int(
+            normalized["minClusterSize"], "config.cluster.minClusterSize"
+        )
+
+    return normalized
+
+
+def reject_secret_config_keys(config, path):
+    for key in config:
+        if not isinstance(key, str):
+            continue
+        normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+        is_secret_key = (
+            normalized
+            in {
+                "apikey",
+                "apitoken",
+                "key",
+                "openaiapikey",
+                "openaikey",
+                "openaisecret",
+                "secret",
+                "token",
+            }
+            or normalized.endswith("apikey")
+            or normalized.endswith("apitoken")
+            or normalized.endswith("secret")
+            or normalized.endswith("token")
+            or (normalized.endswith("key") and ("api" in normalized or "openai" in normalized))
+        )
+        if is_secret_key:
+            raise ValueError(f"{path}.{key} must not contain API keys or tokens; use .env.")
+
+
+def reject_secret_config_values(value, path):
+    if isinstance(value, str):
+        if SECRET_CONFIG_VALUE_PATTERN.search(value):
+            raise ValueError(f"{path} must not contain API keys or tokens; use .env.")
+        return
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            nested_path = f"{path}.{key}" if isinstance(key, str) else path
+            reject_secret_config_values(nested_value, nested_path)
+        return
+    if isinstance(value, list):
+        for index, nested_value in enumerate(value):
+            reject_secret_config_values(nested_value, f"{path}[{index}]")
 
 
 def validate_rows(config, rows):
@@ -339,7 +530,116 @@ def read_all_rows(db, sink_id):
     return rows
 
 
-def write_artifact(db, sink, data, expected_revision=None):
+class SqliteEmbeddingCache:
+    def __init__(self, db):
+        self.db = db
+
+    @staticmethod
+    def dimensions_value(dimensions):
+        return int(dimensions or 0)
+
+    def get_many(self, provider, model, dimensions, text_hashes):
+        if not text_hashes:
+            return {}
+        placeholders = ",".join("?" for _ in text_hashes)
+        rows = self.db.execute(
+            f"""
+            SELECT text_hash, embedding_json
+            FROM embedding_cache
+            WHERE provider = ?
+              AND model = ?
+              AND dimensions = ?
+              AND text_hash IN ({placeholders})
+            """,
+            (
+                provider,
+                model,
+                self.dimensions_value(dimensions),
+                *text_hashes,
+            ),
+        ).fetchall()
+        embeddings = {}
+        for row in rows:
+            try:
+                embeddings[row["text_hash"]] = json.loads(row["embedding_json"])
+            except json.JSONDecodeError:
+                continue
+        return embeddings
+
+    def set_many(self, provider, model, dimensions, embeddings_by_hash):
+        if not embeddings_by_hash:
+            return
+        created_at = now_iso()
+        self.db.executemany(
+            """
+            INSERT OR REPLACE INTO embedding_cache
+              (provider, model, dimensions, text_hash, embedding_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    provider,
+                    model,
+                    self.dimensions_value(dimensions),
+                    text_hash,
+                    json_dumps(embedding),
+                    created_at,
+                )
+                for text_hash, embedding in embeddings_by_hash.items()
+            ],
+        )
+
+
+def embedding_cache_stats(db):
+    return {
+        "embeddingCacheEntryCount": db.execute("SELECT COUNT(*) FROM embedding_cache").fetchone()[0],
+    }
+
+
+def safe_processor_settings(config=None):
+    try:
+        resolved = resolve_processor_options(config or {"cluster": {}})
+    except ProcessingError as error:
+        return {
+            "error": str(error),
+            "embeddingConfigured": bool(os.environ.get("OPENAI_API_KEY")),
+        }
+    return {
+        "textFeatureMethod": resolved["textFeatureMethod"],
+        "embeddingProvider": resolved["embeddingProvider"],
+        "embeddingModel": resolved["embeddingModel"],
+        "embeddingDimensions": resolved["embeddingDimensions"],
+        "embeddingBatchSize": resolved["embeddingBatchSize"],
+        "embeddingTimeoutSeconds": resolved["embeddingTimeoutSeconds"],
+        "embeddingConfigured": bool(os.environ.get("OPENAI_API_KEY")),
+    }
+
+
+def ensure_processing_ready(config):
+    try:
+        resolved = resolve_processor_options(config)
+    except ProcessingError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if resolved["textFeatureMethod"] == "embedding" and not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=400,
+            detail="OPENAI_API_KEY is required when textFeatureMethod is embedding.",
+        )
+
+
+def process_sink_records(db, sink, rows):
+    metadata = {}
+    cache = SqliteEmbeddingCache(db)
+    processed_rows = process_records(
+        sink,
+        rows,
+        embedding_cache=cache,
+        metadata=metadata,
+    )
+    return processed_rows, metadata
+
+
+def write_artifact(db, sink, data, expected_revision=None, processor_metadata=None):
     revision = (
         expected_revision
         if expected_revision is not None
@@ -363,6 +663,7 @@ def write_artifact(db, sink, data, expected_revision=None):
         "layout": {
             "method": "PaCMAP",
             "clusterMethod": "HDBSCAN",
+            **(processor_metadata or {}),
         },
         "data": data,
     }
@@ -445,11 +746,13 @@ def process_pending_sink(sink_id, expected_revision):
             if not sink:
                 return
             rows = read_all_rows(db, sink_id)
+            processed_rows, processor_metadata = process_sink_records(db, sink, rows)
             write_artifact(
                 db,
                 sink,
-                process_records(sink, rows),
+                processed_rows,
                 expected_revision=expected_revision,
+                processor_metadata=processor_metadata,
             )
             db.commit()
     except Exception as error:
@@ -509,8 +812,12 @@ def api_help_payload():
                         "detailField": "summary",
                         "cluster": {
                             "method": "PaCMAP+HDBSCAN",
+                            "textFeatureMethod": "tfidf",
                             "featureFields": ["bookName", "summary"],
                             "numericFields": [],
+                            "embeddingProvider": "openai",
+                            "embeddingModel": "text-embedding-3-small",
+                            "embeddingDimensions": 512,
                             "minClusterSize": 3,
                         },
                     },
@@ -564,7 +871,9 @@ def api_help_payload():
                 "POST /api/data-graph/:id/data appends rows; it does not overwrite existing rows.",
                 "Appended rows are processed after a debounce window so rapid requests are batched.",
                 "Processing uses PaCMAP for 2D layout and HDBSCAN for cluster labels.",
-                "Optional config.cluster.featureFields, numericFields, and minClusterSize can tune processing.",
+                "Optional config.cluster.textFeatureMethod can be tfidf or embedding.",
+                "Embedding mode uses OPENAI_API_KEY from the server environment; API keys are never stored in graph config.",
+                "Optional config.cluster.featureFields, numericFields, embeddingModel, embeddingDimensions, and minClusterSize can tune processing.",
                 "Use GET /api/data-graph/:id/status to check processing state and row counts.",
             ]
         ),
@@ -577,6 +886,7 @@ def system_status_payload():
         batch_count = db.execute("SELECT COUNT(*) FROM data_batches").fetchone()[0]
         row_count = db.execute("SELECT COALESCE(SUM(row_count), 0) FROM data_batches").fetchone()[0]
         artifact_count = db.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+        cache_stats = embedding_cache_stats(db)
     with PROCESS_TIMERS_LOCK:
         scheduled = sorted(PROCESS_TIMERS.keys())
     return {
@@ -594,12 +904,15 @@ def system_status_payload():
         "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
         "maxBodyBytes": MAX_BODY_BYTES,
         "publicBaseUrl": PUBLIC_BASE_URL or None,
+        "processor": safe_processor_settings(),
+        **cache_stats,
     }
 
 
 def sink_help_payload(sink):
     config = sink["config"]
     sample_row = sample_row_for_schema(config["dataSchema"])
+    processor_settings = safe_processor_settings(config)
     return {
         "dataGraphId": sink["id"],
         "name": sink["name"],
@@ -611,9 +924,14 @@ def sink_help_payload(sink):
         "processor": {
             "layoutMethod": "PaCMAP",
             "clusterMethod": "HDBSCAN",
+            "textFeatureMethod": processor_settings.get("textFeatureMethod"),
             "featureFields": (config.get("cluster") or {}).get("featureFields", default_feature_fields(config)),
             "numericFields": (config.get("cluster") or {}).get("numericFields", default_numeric_fields(config)),
             "minClusterSize": (config.get("cluster") or {}).get("minClusterSize"),
+            "embeddingProvider": processor_settings.get("embeddingProvider"),
+            "embeddingModel": processor_settings.get("embeddingModel"),
+            "embeddingDimensions": processor_settings.get("embeddingDimensions"),
+            "embeddingConfigured": processor_settings.get("embeddingConfigured"),
         },
         "auth": {
             "type": "bearer",
@@ -754,6 +1072,7 @@ def get_data_graph_status_payload(graph_id):
         "viewUrl": public_url(f"/clusters/{graph_id}"),
         "ingestUrl": public_url(f"/api/data-graph/{graph_id}/data"),
         "latestArtifactUrl": public_url(f"/api/data-graph/{graph_id}/artifact/latest"),
+        "processor": safe_processor_settings(sink["config"]),
         "updatedAt": sink["updatedAt"],
     }
 
@@ -781,6 +1100,8 @@ def create_data_graph(payload: dict = Body(...)):
         validate_rows(config, rows)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    if rows:
+        ensure_processing_ready(config)
 
     graph_id = new_id("dg")
     created_at = now_iso()
@@ -881,6 +1202,8 @@ def append_rows(graph_id: str, payload: dict = Body(...)):
             rows = validate_rows(sink["config"], payload.get("data"))
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        if rows:
+            ensure_processing_ready(sink["config"])
 
         batch_id = persist_batch(db, sink, rows)
         revision = mark_sink_processing(db, graph_id)
@@ -915,6 +1238,8 @@ def update_schema(graph_id: str, payload: dict = Body(...)):
             validate_rows(config, existing_rows)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        if existing_rows:
+            ensure_processing_ready(config)
         updated_at = now_iso()
         db.execute(
             "UPDATE data_sinks SET name = ?, config_json = ?, updated_at = ? WHERE id = ?",
@@ -922,11 +1247,18 @@ def update_schema(graph_id: str, payload: dict = Body(...)):
         )
         revision = mark_sink_processing(db, graph_id)
         updated_sink = load_sink(db, graph_id)
+        try:
+            processed_rows, processor_metadata = process_sink_records(
+                db, updated_sink, existing_rows
+            )
+        except ProcessingError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         write_artifact(
             db,
             updated_sink,
-            process_records(updated_sink, existing_rows),
+            processed_rows,
             expected_revision=revision,
+            processor_metadata=processor_metadata,
         )
         db.commit()
 
@@ -956,18 +1288,23 @@ def clear_rows(graph_id: str):
             ).fetchall()
         ]
 
-        for path in raw_paths + artifact_paths:
-            if DATA_ROOT in path.parents and path.exists():
-                path.unlink()
-
         db.execute("DELETE FROM data_batches WHERE sink_id = ?", (graph_id,))
         db.execute("DELETE FROM artifacts WHERE sink_id = ?", (graph_id,))
         revision = mark_sink_processing(db, graph_id)
         updated_sink = load_sink(db, graph_id)
+        processed_rows, processor_metadata = process_sink_records(db, updated_sink, [])
         artifact_path = write_artifact(
-            db, updated_sink, [], expected_revision=revision
+            db,
+            updated_sink,
+            processed_rows,
+            expected_revision=revision,
+            processor_metadata=processor_metadata,
         )
         db.commit()
+
+    for path in raw_paths + artifact_paths:
+        if DATA_ROOT in path.parents and path.exists():
+            path.unlink()
 
     return {
         "dataGraphId": graph_id,
