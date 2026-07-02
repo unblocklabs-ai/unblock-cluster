@@ -14,6 +14,70 @@
                         <h1 id="viewTitle">Restaurant clusters by cuisine</h1>
                         <p id="viewSubtitle"></p>
                     </div>
+                    <div class="topbar-actions">
+                        <label class="search-control">
+                            <span>Search</span>
+                            <input
+                                id="recordSearch"
+                                type="search"
+                                autocomplete="off"
+                                placeholder="Record ID, title, detail"
+                            />
+                        </label>
+                        <button
+                            id="clearSearchButton"
+                            type="button"
+                            title="Clear search"
+                            hidden
+                        >
+                            Clear
+                        </button>
+                        <button
+                            id="forgetTokenButton"
+                            type="button"
+                            title="Forget saved token"
+                            hidden
+                        >
+                            Token
+                        </button>
+                    </div>
+                    <div class="filterbar" id="filterbar" aria-label="Record filters">
+                        <label>
+                            <span>Issue type</span>
+                            <select id="issueTypeFilter">
+                                <option value="">All issues</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>Refund</span>
+                            <select id="refundFilter">
+                                <option value="">Any refund</option>
+                                <option value="true">Refund</option>
+                                <option value="false">No refund</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>Cancellation</span>
+                            <select id="cancellationFilter">
+                                <option value="">Any cancellation</option>
+                                <option value="true">Cancellation</option>
+                                <option value="false">No cancellation</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>Color</span>
+                            <select id="colorModeSelect">
+                                <option value="cluster">Cluster</option>
+                                <option value="issueType">Issue type</option>
+                                <option value="outcome">Outcome</option>
+                                <option value="messageCount">Messages</option>
+                            </select>
+                        </label>
+                        <label class="checkbox-filter">
+                            <input id="selectedClusterOnly" type="checkbox" />
+                            <span>Selected cluster</span>
+                        </label>
+                    </div>
                     <div class="stats" id="stats"></div>
                 </header>
 
@@ -31,6 +95,23 @@
                         List
                     </button>
                     <div class="map-controls" aria-label="Map controls">
+                        <button
+                            id="fitAllButton"
+                            type="button"
+                            class="map-control map-control-fit"
+                            title="Fit all visible records"
+                        >
+                            Fit
+                        </button>
+                        <button
+                            id="clearSelectionButton"
+                            type="button"
+                            class="map-control map-control-clear"
+                            title="Clear selection"
+                            hidden
+                        >
+                            Clear
+                        </button>
                         <button id="zoomInButton" type="button" title="Zoom in">
                             +
                         </button>
@@ -43,6 +124,16 @@
                         </button>
                     </div>
                     <div class="legend" id="legend"></div>
+                    <div
+                        class="cluster-browser hidden"
+                        id="clusterBrowser"
+                        aria-label="All clusters"
+                    ></div>
+                    <div
+                        class="hover-preview hidden"
+                        id="hoverPreview"
+                        aria-live="polite"
+                    ></div>
                 </section>
 
                 <section

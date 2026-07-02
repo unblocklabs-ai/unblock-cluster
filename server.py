@@ -11,11 +11,17 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from processor import default_feature_fields, default_numeric_fields, process_records
+from processor import (
+    ProcessingError,
+    default_feature_fields,
+    default_numeric_fields,
+    process_records,
+    resolve_processor_options,
+)
 
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = Path(os.environ.get("DATA_GRAPH_ENV", ROOT / ".env")).resolve()
@@ -46,6 +52,44 @@ PUBLIC_BASE_URL = os.environ.get("DATA_GRAPH_PUBLIC_BASE_URL", "").rstrip("/")
 MAX_BODY_BYTES = int(os.environ.get("DATA_GRAPH_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 PROCESS_DEBOUNCE_SECONDS = float(os.environ.get("DATA_GRAPH_PROCESS_DEBOUNCE_SECONDS", "2.0"))
 SUPPORTED_TYPES = {"String", "Number", "Boolean", "Object", "Array"}
+CONFIG_KEYS = {
+    "name",
+    "description",
+    "source",
+    "dataSchema",
+    "groupingFields",
+    "titleField",
+    "detailField",
+    "imageField",
+    "recordIdField",
+    "pipeline",
+    "cluster",
+}
+TEXT_FEATURE_METHODS = {"tfidf", "embedding"}
+EMBEDDING_PROVIDERS = {"openai"}
+PIPELINE_FILTER_OPS = {"equals", "notEquals", "contains", "notContains", "exists", "notExists"}
+PIPELINE_TRANSFORM_TYPES = {
+    "copyField",
+    "renameField",
+    "setField",
+    "trim",
+    "lowercase",
+    "uppercase",
+}
+CLUSTER_CONFIG_KEYS = {
+    "method",
+    "featureFields",
+    "numericFields",
+    "minClusterSize",
+    "textFeatureMethod",
+    "embeddingProvider",
+    "embeddingModel",
+    "embeddingDimensions",
+    "labelStrategy",
+    "labelField",
+    "labelOverrides",
+}
+SECRET_CONFIG_VALUE_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 ID_PATTERN = re.compile(r"^dg_[A-Za-z0-9_-]{16,64}$")
 PROCESS_TIMERS = {}
 PROCESS_TIMERS_LOCK = threading.Lock()
@@ -144,6 +188,12 @@ def pretty_json(value):
     return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
 
 
+def positive_int(value, field_name):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer.")
+    return value
+
+
 def ensure_private_dir(path):
     path.mkdir(parents=True, exist_ok=True)
     try:
@@ -187,6 +237,16 @@ def init_storage():
               artifact_path TEXT NOT NULL,
               kind TEXT NOT NULL,
               created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+              provider TEXT NOT NULL,
+              model TEXT NOT NULL,
+              dimensions INTEGER NOT NULL DEFAULT 0,
+              text_hash TEXT NOT NULL,
+              embedding_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (provider, model, dimensions, text_hash)
             );
             """
         )
@@ -239,10 +299,20 @@ def new_id(prefix):
 def validate_config(config):
     if not isinstance(config, dict):
         raise ValueError("config must be an object.")
+    reject_secret_config_keys(config, "config")
+    reject_secret_config_values(config, "config")
+    unknown_keys = sorted(set(config) - CONFIG_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            "config contains unsupported fields: "
+            + ", ".join(unknown_keys)
+            + "."
+        )
 
     schema = config.get("dataSchema")
     if not isinstance(schema, dict) or not schema:
         raise ValueError("config.dataSchema must be a non-empty object.")
+    reject_secret_config_keys(schema, "config.dataSchema")
 
     for field, field_type in schema.items():
         if not isinstance(field, str) or not field:
@@ -261,21 +331,316 @@ def validate_config(config):
         if field not in schema:
             raise ValueError(f"Grouping field '{field}' does not exist in dataSchema.")
 
-    for optional_field in ("titleField", "detailField"):
+    for optional_field in ("titleField", "detailField", "imageField", "recordIdField"):
         value = config.get(optional_field)
         if value is not None and value not in schema:
             raise ValueError(f"config.{optional_field} must exist in dataSchema.")
 
-    cluster = config.get("cluster")
-    if cluster is not None and not isinstance(cluster, dict):
-        raise ValueError("config.cluster must be an object when provided.")
+    for text_field in ("description", "source"):
+        value = config.get(text_field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"config.{text_field} must be a string.")
 
-    return {
-        **config,
+    pipeline = validate_pipeline_config(config.get("pipeline"), schema)
+    cluster = validate_cluster_config(config.get("cluster"), schema)
+
+    normalized = {
         "name": str(config.get("name") or "Data Atlas")[:120],
         "dataSchema": schema,
         "groupingFields": grouping_fields,
+        "cluster": cluster,
     }
+    for optional_field in (
+        "description",
+        "source",
+        "titleField",
+        "detailField",
+        "imageField",
+        "recordIdField",
+    ):
+        if optional_field in config:
+            normalized[optional_field] = config.get(optional_field)
+    if pipeline:
+        normalized["pipeline"] = pipeline
+    return normalized
+
+
+def validate_pipeline_config(pipeline, schema):
+    if pipeline is None:
+        return {}
+    if not isinstance(pipeline, dict):
+        raise ValueError("config.pipeline must be an object when provided.")
+    reject_secret_config_keys(pipeline, "config.pipeline")
+
+    unknown_keys = sorted(set(pipeline) - {"filters", "transforms"})
+    if unknown_keys:
+        raise ValueError(
+            "config.pipeline contains unsupported fields: "
+            + ", ".join(unknown_keys)
+            + "."
+        )
+
+    normalized = {}
+    filters = pipeline.get("filters", [])
+    if filters is None:
+        filters = []
+    if not isinstance(filters, list):
+        raise ValueError("config.pipeline.filters must be an array.")
+    normalized_filters = []
+    for index, item in enumerate(filters):
+        if not isinstance(item, dict):
+            raise ValueError(f"config.pipeline.filters[{index}] must be an object.")
+        reject_secret_config_keys(item, f"config.pipeline.filters[{index}]")
+        unknown_filter_keys = sorted(set(item) - {"field", "op", "value"})
+        if unknown_filter_keys:
+            raise ValueError(
+                f"config.pipeline.filters[{index}] contains unsupported fields: "
+                + ", ".join(unknown_filter_keys)
+                + "."
+            )
+        field = item.get("field")
+        if not isinstance(field, str) or not field:
+            raise ValueError(f"config.pipeline.filters[{index}].field must be a non-empty string.")
+        op = item.get("op", "equals")
+        if not isinstance(op, str) or op not in PIPELINE_FILTER_OPS:
+            raise ValueError(
+                f"config.pipeline.filters[{index}].op must be one of: "
+                + ", ".join(sorted(PIPELINE_FILTER_OPS))
+                + "."
+            )
+        normalized_item = {"field": field, "op": op}
+        if "value" in item:
+            normalized_item["value"] = item["value"]
+        normalized_filters.append(normalized_item)
+    if normalized_filters:
+        normalized["filters"] = normalized_filters
+
+    transforms = pipeline.get("transforms", [])
+    if transforms is None:
+        transforms = []
+    if not isinstance(transforms, list):
+        raise ValueError("config.pipeline.transforms must be an array.")
+    normalized_transforms = []
+    for index, item in enumerate(transforms):
+        if not isinstance(item, dict):
+            raise ValueError(f"config.pipeline.transforms[{index}] must be an object.")
+        reject_secret_config_keys(item, f"config.pipeline.transforms[{index}]")
+        transform_type = item.get("type")
+        if not isinstance(transform_type, str) or transform_type not in PIPELINE_TRANSFORM_TYPES:
+            raise ValueError(
+                f"config.pipeline.transforms[{index}].type must be one of: "
+                + ", ".join(sorted(PIPELINE_TRANSFORM_TYPES))
+                + "."
+            )
+        normalized_item = {"type": transform_type}
+        if transform_type in {"copyField", "renameField"}:
+            unknown_transform_keys = sorted(set(item) - {"type", "from", "to"})
+            if unknown_transform_keys:
+                raise ValueError(
+                    f"config.pipeline.transforms[{index}] contains unsupported fields: "
+                    + ", ".join(unknown_transform_keys)
+                    + "."
+                )
+            source = item.get("from")
+            target = item.get("to")
+            if not isinstance(source, str) or not source:
+                raise ValueError(f"config.pipeline.transforms[{index}].from must be a non-empty string.")
+            if target not in schema:
+                raise ValueError(f"config.pipeline.transforms[{index}].to must exist in dataSchema.")
+            normalized_item.update({"from": source, "to": target})
+        elif transform_type == "setField":
+            unknown_transform_keys = sorted(set(item) - {"type", "field", "value"})
+            if unknown_transform_keys:
+                raise ValueError(
+                    f"config.pipeline.transforms[{index}] contains unsupported fields: "
+                    + ", ".join(unknown_transform_keys)
+                    + "."
+                )
+            field = item.get("field")
+            if field not in schema:
+                raise ValueError(f"config.pipeline.transforms[{index}].field must exist in dataSchema.")
+            value = item.get("value")
+            if value is None or not value_matches_type(value, schema[field]):
+                raise ValueError(
+                    f"config.pipeline.transforms[{index}].value must be {schema[field]}."
+                )
+            normalized_item.update({"field": field, "value": value})
+        else:
+            unknown_transform_keys = sorted(set(item) - {"type", "field"})
+            if unknown_transform_keys:
+                raise ValueError(
+                    f"config.pipeline.transforms[{index}] contains unsupported fields: "
+                    + ", ".join(unknown_transform_keys)
+                    + "."
+                )
+            field = item.get("field")
+            if field not in schema:
+                raise ValueError(f"config.pipeline.transforms[{index}].field must exist in dataSchema.")
+            if schema.get(field) != "String":
+                raise ValueError(f"config.pipeline.transforms[{index}].field must be a String field.")
+            normalized_item["field"] = field
+        normalized_transforms.append(normalized_item)
+    if normalized_transforms:
+        normalized["transforms"] = normalized_transforms
+    return normalized
+
+
+def validate_cluster_config(cluster, schema):
+    if cluster is None:
+        return {}
+    if not isinstance(cluster, dict):
+        raise ValueError("config.cluster must be an object when provided.")
+    reject_secret_config_keys(cluster, "config.cluster")
+
+    normalized = dict(cluster)
+    unknown_keys = sorted(set(normalized) - CLUSTER_CONFIG_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            "config.cluster contains unsupported fields: "
+            + ", ".join(unknown_keys)
+            + "."
+        )
+
+    for field_name in ("featureFields", "numericFields"):
+        fields = normalized.get(field_name)
+        if fields is None:
+            continue
+        if not isinstance(fields, list) or not all(isinstance(field, str) for field in fields):
+            raise ValueError(f"config.cluster.{field_name} must be an array of field names.")
+        unknown = [field for field in fields if field not in schema]
+        if unknown:
+            raise ValueError(
+                f"config.cluster.{field_name} contains unknown fields: {', '.join(unknown)}."
+            )
+
+    if "numericFields" in normalized:
+        non_numeric = [
+            field
+            for field in normalized["numericFields"]
+            if schema.get(field) != "Number"
+        ]
+        if non_numeric:
+            raise ValueError(
+                "config.cluster.numericFields can only include Number fields: "
+                + ", ".join(non_numeric)
+                + "."
+            )
+
+    text_feature_method = normalized.get("textFeatureMethod")
+    if text_feature_method is not None:
+        if not isinstance(text_feature_method, str):
+            raise ValueError("config.cluster.textFeatureMethod must be a string.")
+        text_feature_method = text_feature_method.strip().lower()
+        if text_feature_method not in TEXT_FEATURE_METHODS:
+            raise ValueError(
+                "config.cluster.textFeatureMethod must be one of: "
+                + ", ".join(sorted(TEXT_FEATURE_METHODS))
+                + "."
+            )
+        normalized["textFeatureMethod"] = text_feature_method
+
+    embedding_provider = normalized.get("embeddingProvider")
+    if embedding_provider is not None:
+        if not isinstance(embedding_provider, str):
+            raise ValueError("config.cluster.embeddingProvider must be a string.")
+        embedding_provider = embedding_provider.strip().lower()
+        if embedding_provider not in EMBEDDING_PROVIDERS:
+            raise ValueError(
+                "config.cluster.embeddingProvider must be one of: "
+                + ", ".join(sorted(EMBEDDING_PROVIDERS))
+                + "."
+            )
+        normalized["embeddingProvider"] = embedding_provider
+
+    embedding_model = normalized.get("embeddingModel")
+    if embedding_model is not None:
+        if not isinstance(embedding_model, str) or not embedding_model.strip():
+            raise ValueError("config.cluster.embeddingModel must be a non-empty string.")
+        normalized["embeddingModel"] = embedding_model.strip()
+
+    if "embeddingDimensions" in normalized and normalized["embeddingDimensions"] is not None:
+        normalized["embeddingDimensions"] = positive_int(
+            normalized["embeddingDimensions"], "config.cluster.embeddingDimensions"
+        )
+
+    if "minClusterSize" in normalized and normalized["minClusterSize"] is not None:
+        normalized["minClusterSize"] = positive_int(
+            normalized["minClusterSize"], "config.cluster.minClusterSize"
+        )
+
+    label_strategy = normalized.get("labelStrategy")
+    if label_strategy is not None:
+        if not isinstance(label_strategy, str):
+            raise ValueError("config.cluster.labelStrategy must be a string.")
+        label_strategy = label_strategy.strip()
+        allowed = {"groupingField", "labelField", "clusterId"}
+        if label_strategy not in allowed:
+            raise ValueError(
+                "config.cluster.labelStrategy must be one of: "
+                + ", ".join(sorted(allowed))
+                + "."
+            )
+        normalized["labelStrategy"] = label_strategy
+
+    label_field = normalized.get("labelField")
+    if label_field is not None:
+        if label_field not in schema:
+            raise ValueError("config.cluster.labelField must exist in dataSchema.")
+        normalized["labelField"] = label_field
+
+    label_overrides = normalized.get("labelOverrides")
+    if label_overrides is not None:
+        if not isinstance(label_overrides, dict):
+            raise ValueError("config.cluster.labelOverrides must be an object.")
+        normalized["labelOverrides"] = {
+            str(key): str(value)[:120]
+            for key, value in label_overrides.items()
+            if value not in (None, "")
+        }
+
+    return normalized
+
+
+def reject_secret_config_keys(config, path):
+    for key in config:
+        if not isinstance(key, str):
+            continue
+        normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+        is_secret_key = (
+            normalized
+            in {
+                "apikey",
+                "apitoken",
+                "key",
+                "openaiapikey",
+                "openaikey",
+                "openaisecret",
+                "secret",
+                "token",
+            }
+            or normalized.endswith("apikey")
+            or normalized.endswith("apitoken")
+            or normalized.endswith("secret")
+            or normalized.endswith("token")
+            or (normalized.endswith("key") and ("api" in normalized or "openai" in normalized))
+        )
+        if is_secret_key:
+            raise ValueError(f"{path}.{key} must not contain API keys or tokens; use .env.")
+
+
+def reject_secret_config_values(value, path):
+    if isinstance(value, str):
+        if SECRET_CONFIG_VALUE_PATTERN.search(value):
+            raise ValueError(f"{path} must not contain API keys or tokens; use .env.")
+        return
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            nested_path = f"{path}.{key}" if isinstance(key, str) else path
+            reject_secret_config_values(nested_value, nested_path)
+        return
+    if isinstance(value, list):
+        for index, nested_value in enumerate(value):
+            reject_secret_config_values(nested_value, f"{path}[{index}]")
 
 
 def validate_rows(config, rows):
@@ -291,6 +656,101 @@ def validate_rows(config, rows):
             if not value_matches_type(row[field], field_type):
                 raise ValueError(f"data[{index}].{field} must be {field_type}.")
     return rows
+
+
+def validate_raw_rows(rows):
+    if not isinstance(rows, list):
+        raise ValueError("data must be an array.")
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"data[{index}] must be an object.")
+    return rows
+
+
+def transformed_rows_for_config(config, rows):
+    raw_rows = validate_raw_rows(rows)
+    transformed_rows, pipeline_metadata = apply_pipeline(config, raw_rows)
+    validate_rows(config, transformed_rows)
+    return transformed_rows, pipeline_metadata
+
+
+def apply_pipeline(config, rows):
+    pipeline = config.get("pipeline") or {}
+    filters = pipeline.get("filters") or []
+    transforms = pipeline.get("transforms") or []
+    output = []
+    filtered_count = 0
+    for row in rows:
+        next_row = dict(row)
+        for transform in transforms:
+            apply_transform(next_row, transform)
+        if all(filter_matches(next_row, item) for item in filters):
+            output.append(next_row)
+        else:
+            filtered_count += 1
+    return output, {
+        "enabled": bool(filters or transforms),
+        "inputRecordCount": len(rows),
+        "outputRecordCount": len(output),
+        "filteredRecordCount": filtered_count,
+        "transformCount": len(transforms),
+        "filterCount": len(filters),
+    }
+
+
+def apply_transform(row, transform):
+    transform_type = transform["type"]
+    if transform_type == "copyField":
+        if transform["from"] in row:
+            row[transform["to"]] = row.get(transform["from"])
+        return
+    if transform_type == "renameField":
+        if transform["from"] in row:
+            row[transform["to"]] = row.pop(transform["from"])
+        return
+    if transform_type == "setField":
+        row[transform["field"]] = transform.get("value")
+        return
+
+    field = transform["field"]
+    value = row.get(field)
+    if value is None:
+        return
+    text = str(value)
+    if transform_type == "trim":
+        row[field] = text.strip()
+    elif transform_type == "lowercase":
+        row[field] = text.lower()
+    elif transform_type == "uppercase":
+        row[field] = text.upper()
+
+
+def filter_matches(row, item):
+    op = item["op"]
+    value = row.get(item["field"])
+    expected = item.get("value")
+    if op == "exists":
+        return value not in (None, "")
+    if op == "notExists":
+        return value in (None, "")
+    if op == "equals":
+        return value == expected
+    if op == "notEquals":
+        return value != expected
+    contains = value_contains(value, expected)
+    if op == "contains":
+        return contains
+    if op == "notContains":
+        return not contains
+    return True
+
+
+def value_contains(value, expected):
+    if value is None:
+        return False
+    if isinstance(value, list):
+        return expected in value
+    return str(expected).casefold() in str(value).casefold()
 
 
 def value_matches_type(value, field_type):
@@ -339,7 +799,117 @@ def read_all_rows(db, sink_id):
     return rows
 
 
-def write_artifact(db, sink, data, expected_revision=None):
+class SqliteEmbeddingCache:
+    def __init__(self, db):
+        self.db = db
+
+    @staticmethod
+    def dimensions_value(dimensions):
+        return int(dimensions or 0)
+
+    def get_many(self, provider, model, dimensions, text_hashes):
+        if not text_hashes:
+            return {}
+        placeholders = ",".join("?" for _ in text_hashes)
+        rows = self.db.execute(
+            f"""
+            SELECT text_hash, embedding_json
+            FROM embedding_cache
+            WHERE provider = ?
+              AND model = ?
+              AND dimensions = ?
+              AND text_hash IN ({placeholders})
+            """,
+            (
+                provider,
+                model,
+                self.dimensions_value(dimensions),
+                *text_hashes,
+            ),
+        ).fetchall()
+        embeddings = {}
+        for row in rows:
+            try:
+                embeddings[row["text_hash"]] = json.loads(row["embedding_json"])
+            except json.JSONDecodeError:
+                continue
+        return embeddings
+
+    def set_many(self, provider, model, dimensions, embeddings_by_hash):
+        if not embeddings_by_hash:
+            return
+        created_at = now_iso()
+        self.db.executemany(
+            """
+            INSERT OR REPLACE INTO embedding_cache
+              (provider, model, dimensions, text_hash, embedding_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    provider,
+                    model,
+                    self.dimensions_value(dimensions),
+                    text_hash,
+                    json_dumps(embedding),
+                    created_at,
+                )
+                for text_hash, embedding in embeddings_by_hash.items()
+            ],
+        )
+
+
+def embedding_cache_stats(db):
+    return {
+        "embeddingCacheEntryCount": db.execute("SELECT COUNT(*) FROM embedding_cache").fetchone()[0],
+    }
+
+
+def safe_processor_settings(config=None):
+    try:
+        resolved = resolve_processor_options(config or {"cluster": {}})
+    except ProcessingError as error:
+        return {
+            "error": str(error),
+            "embeddingConfigured": bool(os.environ.get("OPENAI_API_KEY")),
+        }
+    return {
+        "textFeatureMethod": resolved["textFeatureMethod"],
+        "embeddingProvider": resolved["embeddingProvider"],
+        "embeddingModel": resolved["embeddingModel"],
+        "embeddingDimensions": resolved["embeddingDimensions"],
+        "embeddingBatchSize": resolved["embeddingBatchSize"],
+        "embeddingTimeoutSeconds": resolved["embeddingTimeoutSeconds"],
+        "embeddingConfigured": bool(os.environ.get("OPENAI_API_KEY")),
+    }
+
+
+def ensure_processing_ready(config):
+    try:
+        resolved = resolve_processor_options(config)
+    except ProcessingError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if resolved["textFeatureMethod"] == "embedding" and not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(
+            status_code=400,
+            detail="OPENAI_API_KEY is required when textFeatureMethod is embedding.",
+        )
+
+
+def process_sink_records(db, sink, rows):
+    processed_input_rows, pipeline_metadata = transformed_rows_for_config(sink["config"], rows)
+    metadata = {"pipeline": pipeline_metadata}
+    cache = SqliteEmbeddingCache(db)
+    processed_rows = process_records(
+        sink,
+        processed_input_rows,
+        embedding_cache=cache,
+        metadata=metadata,
+    )
+    return processed_rows, metadata
+
+
+def write_artifact(db, sink, data, expected_revision=None, processor_metadata=None):
     revision = (
         expected_revision
         if expected_revision is not None
@@ -363,6 +933,7 @@ def write_artifact(db, sink, data, expected_revision=None):
         "layout": {
             "method": "PaCMAP",
             "clusterMethod": "HDBSCAN",
+            **(processor_metadata or {}),
         },
         "data": data,
     }
@@ -445,11 +1016,13 @@ def process_pending_sink(sink_id, expected_revision):
             if not sink:
                 return
             rows = read_all_rows(db, sink_id)
+            processed_rows, processor_metadata = process_sink_records(db, sink, rows)
             write_artifact(
                 db,
                 sink,
-                process_records(sink, rows),
+                processed_rows,
                 expected_revision=expected_revision,
+                processor_metadata=processor_metadata,
             )
             db.commit()
     except Exception as error:
@@ -500,25 +1073,46 @@ def api_help_payload():
                     "config": {
                         "name": "Book Clusters",
                         "dataSchema": {
+                            "bookId": "String",
                             "bookName": "String",
                             "genre": "String",
                             "summary": "String",
+                            "archived": "Boolean",
                         },
                         "groupingFields": ["genre"],
+                        "recordIdField": "bookId",
                         "titleField": "bookName",
                         "detailField": "summary",
+                        "pipeline": {
+                            "transforms": [
+                                {"type": "trim", "field": "bookName"},
+                                {"type": "copyField", "from": "sourceTicketId", "to": "bookId"},
+                            ],
+                            "filters": [
+                                {"field": "archived", "op": "notEquals", "value": True}
+                            ],
+                        },
                         "cluster": {
                             "method": "PaCMAP+HDBSCAN",
+                            "textFeatureMethod": "tfidf",
                             "featureFields": ["bookName", "summary"],
                             "numericFields": [],
+                            "embeddingProvider": "openai",
+                            "embeddingModel": "text-embedding-3-small",
+                            "embeddingDimensions": 512,
                             "minClusterSize": 3,
+                            "labelStrategy": "labelField",
+                            "labelField": "genre",
+                            "labelOverrides": {"-1": "Needs review"},
                         },
                     },
                     "data": [
                         {
+                            "sourceTicketId": "BOOK-001",
                             "bookName": "Dune",
                             "genre": "Science Fiction",
                             "summary": "A desert planet power struggle.",
+                            "archived": False,
                         }
                     ],
                 },
@@ -541,9 +1135,11 @@ def api_help_payload():
                 "payload": {
                     "data": [
                         {
+                            "sourceTicketId": "BOOK-001",
                             "bookName": "Dune",
                             "genre": "Science Fiction",
                             "summary": "A desert planet power struggle.",
+                            "archived": False,
                         }
                     ]
                 },
@@ -551,6 +1147,10 @@ def api_help_payload():
             "clearRows": {
                 "method": "DELETE",
                 "url": "/api/data-graph/:id/data",
+            },
+            "searchRecords": {
+                "method": "GET",
+                "url": "/api/data-graph/:id/records/search?q=<record id or text>",
             },
             "view": {
                 "method": "GET",
@@ -564,7 +1164,11 @@ def api_help_payload():
                 "POST /api/data-graph/:id/data appends rows; it does not overwrite existing rows.",
                 "Appended rows are processed after a debounce window so rapid requests are batched.",
                 "Processing uses PaCMAP for 2D layout and HDBSCAN for cluster labels.",
-                "Optional config.cluster.featureFields, numericFields, and minClusterSize can tune processing.",
+                "Optional config.cluster.textFeatureMethod can be tfidf or embedding.",
+                "Embedding mode uses OPENAI_API_KEY from the server environment; API keys are never stored in graph config.",
+                "Optional config.pipeline.transforms and filters run before validation and clustering while raw batches remain unchanged.",
+                "Optional config.recordIdField controls record URL/search identity.",
+                "Optional config.cluster.featureFields, numericFields, embeddingModel, embeddingDimensions, minClusterSize, labelStrategy, labelField, and labelOverrides can tune processing.",
                 "Use GET /api/data-graph/:id/status to check processing state and row counts.",
             ]
         ),
@@ -577,6 +1181,7 @@ def system_status_payload():
         batch_count = db.execute("SELECT COUNT(*) FROM data_batches").fetchone()[0]
         row_count = db.execute("SELECT COALESCE(SUM(row_count), 0) FROM data_batches").fetchone()[0]
         artifact_count = db.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+        cache_stats = embedding_cache_stats(db)
     with PROCESS_TIMERS_LOCK:
         scheduled = sorted(PROCESS_TIMERS.keys())
     return {
@@ -594,12 +1199,15 @@ def system_status_payload():
         "processDebounceSeconds": PROCESS_DEBOUNCE_SECONDS,
         "maxBodyBytes": MAX_BODY_BYTES,
         "publicBaseUrl": PUBLIC_BASE_URL or None,
+        "processor": safe_processor_settings(),
+        **cache_stats,
     }
 
 
 def sink_help_payload(sink):
     config = sink["config"]
     sample_row = sample_row_for_schema(config["dataSchema"])
+    processor_settings = safe_processor_settings(config)
     return {
         "dataGraphId": sink["id"],
         "name": sink["name"],
@@ -608,12 +1216,22 @@ def sink_help_payload(sink):
         "groupingFields": config["groupingFields"],
         "titleField": config.get("titleField"),
         "detailField": config.get("detailField"),
+        "recordIdField": config.get("recordIdField"),
+        "pipeline": config.get("pipeline", {}),
         "processor": {
             "layoutMethod": "PaCMAP",
             "clusterMethod": "HDBSCAN",
+            "textFeatureMethod": processor_settings.get("textFeatureMethod"),
             "featureFields": (config.get("cluster") or {}).get("featureFields", default_feature_fields(config)),
             "numericFields": (config.get("cluster") or {}).get("numericFields", default_numeric_fields(config)),
             "minClusterSize": (config.get("cluster") or {}).get("minClusterSize"),
+            "labelStrategy": (config.get("cluster") or {}).get("labelStrategy", "groupingField"),
+            "labelField": (config.get("cluster") or {}).get("labelField"),
+            "labelOverrideCount": len((config.get("cluster") or {}).get("labelOverrides", {})),
+            "embeddingProvider": processor_settings.get("embeddingProvider"),
+            "embeddingModel": processor_settings.get("embeddingModel"),
+            "embeddingDimensions": processor_settings.get("embeddingDimensions"),
+            "embeddingConfigured": processor_settings.get("embeddingConfigured"),
         },
         "auth": {
             "type": "bearer",
@@ -635,6 +1253,10 @@ def sink_help_payload(sink):
         "latestArtifact": {
             "method": "GET",
             "url": public_url(f"/api/data-graph/{sink['id']}/artifact/latest"),
+        },
+        "searchRecords": {
+            "method": "GET",
+            "url": public_url(f"/api/data-graph/{sink['id']}/records/search?q=<record id or text>"),
         },
         "clearRows": {
             "method": "DELETE",
@@ -754,8 +1376,75 @@ def get_data_graph_status_payload(graph_id):
         "viewUrl": public_url(f"/clusters/{graph_id}"),
         "ingestUrl": public_url(f"/api/data-graph/{graph_id}/data"),
         "latestArtifactUrl": public_url(f"/api/data-graph/{graph_id}/artifact/latest"),
+        "processor": safe_processor_settings(sink["config"]),
         "updatedAt": sink["updatedAt"],
     }
+
+
+def record_identity_fields(config):
+    fields = []
+    if config.get("recordIdField"):
+        fields.append(config["recordIdField"])
+    for field in ("id", "ticketId", "sourceTicketId", "sourceId", "issueId", "key"):
+        if field not in fields:
+            fields.append(field)
+    return fields
+
+
+def record_identity(record, config):
+    for field in record_identity_fields(config):
+        value = record.get(field)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def record_search_text(record, config):
+    fields = record_identity_fields(config)
+    for field in (config.get("titleField"), config.get("detailField")):
+        if field and field not in fields:
+            fields.append(field)
+    values = []
+    for field in fields:
+        value = record.get(field)
+        if value not in (None, ""):
+            values.append(str(value))
+    return " ".join(values).casefold()
+
+
+def search_records(records, config, query, limit):
+    query = str(query or "").strip()
+    if not query:
+        return []
+    query_folded = query.casefold()
+    matches = []
+    for index, record in enumerate(records):
+        identity = record_identity(record, config)
+        exact_identity = identity is not None and identity.casefold() == query_folded
+        text = record_search_text(record, config)
+        if exact_identity or query_folded in text:
+            matches.append(
+                (
+                    0 if exact_identity else 1,
+                    index,
+                    {
+                        **record,
+                        "__index": index,
+                        "__recordId": identity,
+                    },
+                )
+            )
+    matches.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in matches[:limit]]
+
+
+def latest_artifact_payload(sink):
+    if not sink["latestArtifactPath"]:
+        return {"config": sink["config"], "data": []}
+    artifact_path = Path(sink["latestArtifactPath"]).resolve()
+    if DATA_ROOT not in artifact_path.parents or not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    return json.loads(artifact_path.read_text())
 
 
 @app.get("/api/help", dependencies=[Depends(require_auth)])
@@ -778,9 +1467,11 @@ def create_data_graph(payload: dict = Body(...)):
     try:
         config = validate_config(payload.get("config"))
         rows = payload.get("data", [])
-        validate_rows(config, rows)
+        transformed_rows, _ = transformed_rows_for_config(config, rows)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+    if transformed_rows:
+        ensure_processing_ready(config)
 
     graph_id = new_id("dg")
     created_at = now_iso()
@@ -857,12 +1548,30 @@ def get_latest_artifact(graph_id: str):
         sink = load_sink(db, graph_id)
     if not sink:
         raise HTTPException(status_code=404, detail="Data graph not found.")
-    if not sink["latestArtifactPath"]:
-        return {"config": sink["config"], "data": []}
-    artifact_path = Path(sink["latestArtifactPath"]).resolve()
-    if DATA_ROOT not in artifact_path.parents or not artifact_path.exists():
-        raise HTTPException(status_code=404, detail="Artifact not found.")
-    return json.loads(artifact_path.read_text())
+    return latest_artifact_payload(sink)
+
+
+@app.get("/api/data-graph/{graph_id}/records/search", dependencies=[Depends(require_auth)])
+def search_data_graph_records(
+    graph_id: str,
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=25, ge=1, le=100),
+):
+    if not ID_PATTERN.match(graph_id):
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    with connect_db() as db:
+        sink = load_sink(db, graph_id)
+    if not sink:
+        raise HTTPException(status_code=404, detail="Data graph not found.")
+    payload = latest_artifact_payload(sink)
+    records = search_records(payload.get("data") or [], payload.get("config") or sink["config"], q, limit)
+    return {
+        "dataGraphId": graph_id,
+        "query": q,
+        "recordIdField": (payload.get("config") or sink["config"]).get("recordIdField"),
+        "count": len(records),
+        "records": records,
+    }
 
 
 @app.post(
@@ -878,9 +1587,12 @@ def append_rows(graph_id: str, payload: dict = Body(...)):
         if not sink:
             raise HTTPException(status_code=404, detail="Data graph not found.")
         try:
-            rows = validate_rows(sink["config"], payload.get("data"))
+            rows = validate_raw_rows(payload.get("data"))
+            transformed_rows, _ = transformed_rows_for_config(sink["config"], rows)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        if transformed_rows:
+            ensure_processing_ready(sink["config"])
 
         batch_id = persist_batch(db, sink, rows)
         revision = mark_sink_processing(db, graph_id)
@@ -912,9 +1624,11 @@ def update_schema(graph_id: str, payload: dict = Body(...)):
             raise HTTPException(status_code=404, detail="Data graph not found.")
         existing_rows = read_all_rows(db, graph_id)
         try:
-            validate_rows(config, existing_rows)
+            transformed_rows, _ = transformed_rows_for_config(config, existing_rows)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        if transformed_rows:
+            ensure_processing_ready(config)
         updated_at = now_iso()
         db.execute(
             "UPDATE data_sinks SET name = ?, config_json = ?, updated_at = ? WHERE id = ?",
@@ -922,11 +1636,18 @@ def update_schema(graph_id: str, payload: dict = Body(...)):
         )
         revision = mark_sink_processing(db, graph_id)
         updated_sink = load_sink(db, graph_id)
+        try:
+            processed_rows, processor_metadata = process_sink_records(
+                db, updated_sink, existing_rows
+            )
+        except ProcessingError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
         write_artifact(
             db,
             updated_sink,
-            process_records(updated_sink, existing_rows),
+            processed_rows,
             expected_revision=revision,
+            processor_metadata=processor_metadata,
         )
         db.commit()
 
@@ -956,18 +1677,23 @@ def clear_rows(graph_id: str):
             ).fetchall()
         ]
 
-        for path in raw_paths + artifact_paths:
-            if DATA_ROOT in path.parents and path.exists():
-                path.unlink()
-
         db.execute("DELETE FROM data_batches WHERE sink_id = ?", (graph_id,))
         db.execute("DELETE FROM artifacts WHERE sink_id = ?", (graph_id,))
         revision = mark_sink_processing(db, graph_id)
         updated_sink = load_sink(db, graph_id)
+        processed_rows, processor_metadata = process_sink_records(db, updated_sink, [])
         artifact_path = write_artifact(
-            db, updated_sink, [], expected_revision=revision
+            db,
+            updated_sink,
+            processed_rows,
+            expected_revision=revision,
+            processor_metadata=processor_metadata,
         )
         db.commit()
+
+    for path in raw_paths + artifact_paths:
+        if DATA_ROOT in path.parents and path.exists():
+            path.unlink()
 
     return {
         "dataGraphId": graph_id,
@@ -993,6 +1719,11 @@ def serve_cluster(graph_id: str):
 @app.get("/")
 def serve_root():
     return FileResponse(index_file(), media_type="text/html")
+
+
+@app.get("/favicon.ico")
+def serve_favicon():
+    return Response(status_code=204)
 
 
 if (PUBLIC_ROOT / "assets").exists():
