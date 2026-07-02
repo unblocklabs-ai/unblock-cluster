@@ -14,6 +14,33 @@
                         <h1 id="viewTitle">Restaurant clusters by cuisine</h1>
                         <p id="viewSubtitle"></p>
                     </div>
+                    <div class="topbar-actions">
+                        <label class="search-control">
+                            <span>Search</span>
+                            <input
+                                id="recordSearch"
+                                type="search"
+                                autocomplete="off"
+                                placeholder="Record ID, title, detail"
+                            />
+                        </label>
+                        <button
+                            id="clearSearchButton"
+                            type="button"
+                            title="Clear search"
+                            hidden
+                        >
+                            Clear
+                        </button>
+                        <button
+                            id="forgetTokenButton"
+                            type="button"
+                            title="Forget saved token"
+                            hidden
+                        >
+                            Token
+                        </button>
+                    </div>
                     <div class="stats" id="stats"></div>
                 </header>
 

@@ -198,6 +198,133 @@ class ServerRegressionTests(unittest.TestCase):
 
         self.assertIn("numericFields", str(numeric_context.exception))
 
+        with self.assertRaises(ValueError) as label_context:
+            self.server.validate_config(
+                {
+                    "name": "Bad Label Config",
+                    "dataSchema": {"name": "String", "score": "Number"},
+                    "groupingFields": ["name"],
+                    "cluster": {
+                        "labelField": "missing",
+                    },
+                }
+            )
+
+        self.assertIn("labelField", str(label_context.exception))
+
+    def test_pipeline_transforms_filter_and_validates_rows(self):
+        config = self.server.validate_config(
+            {
+                "name": "Pipeline Graph",
+                "dataSchema": {
+                    "id": "String",
+                    "title": "String",
+                    "kind": "String",
+                    "archived": "Boolean",
+                },
+                "groupingFields": ["kind"],
+                "recordIdField": "id",
+                "titleField": "title",
+                "detailField": "kind",
+                "pipeline": {
+                    "transforms": [
+                        {"type": "copyField", "from": "ticket", "to": "id"},
+                        {"type": "trim", "field": "title"},
+                    ],
+                    "filters": [
+                        {"field": "archived", "op": "notEquals", "value": True},
+                    ],
+                },
+            }
+        )
+
+        rows, metadata = self.server.transformed_rows_for_config(
+            config,
+            [
+                {
+                    "ticket": "BUG-1",
+                    "title": "  Login fails  ",
+                    "kind": "bug",
+                    "archived": False,
+                },
+                {
+                    "ticket": "BUG-2",
+                    "title": "Old issue",
+                    "kind": "bug",
+                    "archived": True,
+                },
+            ],
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "BUG-1")
+        self.assertEqual(rows[0]["title"], "Login fails")
+        self.assertEqual(metadata["filteredRecordCount"], 1)
+
+    def test_pipeline_rejects_unknown_target_field(self):
+        with self.assertRaises(ValueError) as context:
+            self.server.validate_config(
+                {
+                    "name": "Bad Pipeline",
+                    "dataSchema": {"id": "String", "kind": "String"},
+                    "groupingFields": ["kind"],
+                    "pipeline": {
+                        "transforms": [
+                            {"type": "copyField", "from": "ticket", "to": "missing"},
+                        ],
+                    },
+                }
+            )
+
+        self.assertIn("dataSchema", str(context.exception))
+
+    def test_pipeline_rejects_set_field_value_with_wrong_type(self):
+        with self.assertRaises(ValueError) as context:
+            self.server.validate_config(
+                {
+                    "name": "Bad Set Field",
+                    "dataSchema": {"score": "Number", "kind": "String"},
+                    "groupingFields": ["kind"],
+                    "pipeline": {
+                        "transforms": [
+                            {"type": "setField", "field": "score", "value": "bad"},
+                        ],
+                    },
+                }
+            )
+
+        self.assertIn("must be Number", str(context.exception))
+
+    def test_embedding_create_all_filtered_rows_does_not_require_api_key(self):
+        response = self.server.create_data_graph(
+            {
+                "config": {
+                    "name": "Filtered Embedding",
+                    "dataSchema": {
+                        "name": "String",
+                        "kind": "String",
+                        "archived": "Boolean",
+                    },
+                    "groupingFields": ["kind"],
+                    "pipeline": {
+                        "filters": [
+                            {"field": "archived", "op": "equals", "value": False},
+                        ],
+                    },
+                    "cluster": {"textFeatureMethod": "embedding"},
+                },
+                "data": [{"name": "old", "kind": "a", "archived": True}],
+            }
+        )
+        self.server.cancel_scheduled_rebuild(response["dataGraphId"])
+
+        with self.server.connect_db() as db:
+            sink_count = db.execute("SELECT COUNT(*) FROM data_sinks").fetchone()[0]
+            batch_count = db.execute("SELECT COUNT(*) FROM data_batches").fetchone()[0]
+
+        self.assertEqual(sink_count, 1)
+        self.assertEqual(batch_count, 1)
+
     def test_config_rejects_api_key_fields(self):
         with self.assertRaises(ValueError) as context:
             self.server.validate_config(
@@ -366,6 +493,34 @@ class ServerRegressionTests(unittest.TestCase):
 
         self.assertIn("embeddingConfigured", serialized)
         self.assertNotIn("sk-test-secret", serialized)
+
+    def test_record_search_prefers_configured_record_id_field(self):
+        records = [
+            {
+                "id": "internal-1",
+                "sourceTicketId": "SUP-100",
+                "title": "Login failure",
+                "summary": "OAuth callback error",
+            },
+            {
+                "id": "internal-2",
+                "sourceTicketId": "SUP-101",
+                "title": "Billing",
+                "summary": "Invoice search",
+            },
+        ]
+        config = {
+            "recordIdField": "sourceTicketId",
+            "titleField": "title",
+            "detailField": "summary",
+        }
+
+        exact = self.server.search_records(records, config, "SUP-101", 10)
+        text = self.server.search_records(records, config, "callback", 10)
+
+        self.assertEqual(exact[0]["__recordId"], "SUP-101")
+        self.assertEqual(exact[0]["title"], "Billing")
+        self.assertEqual(text[0]["__recordId"], "SUP-100")
 
     def test_embedding_error_keeps_prior_latest_artifact(self):
         config = self.server.validate_config(
