@@ -49,6 +49,81 @@ SUPPORTED_TYPES = {"String", "Number", "Boolean", "Object", "Array"}
 ID_PATTERN = re.compile(r"^dg_[A-Za-z0-9_-]{16,64}$")
 PROCESS_TIMERS = {}
 PROCESS_TIMERS_LOCK = threading.Lock()
+SAMPLE_MANIFEST = json.loads((ROOT / "sample-manifest.json").read_text())
+PUBLIC_SAMPLE_FILES = {
+    Path(sample_name).name
+    for sample_name in SAMPLE_MANIFEST.get("publicSampleFiles", [])
+}
+
+
+class RequestBodyTooLarge(Exception):
+    pass
+
+
+class BodyLimitMiddleware:
+    def __init__(self, app, max_body_bytes):
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        content_length = dict(scope.get("headers") or []).get(b"content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > self.max_body_bytes:
+                    await self.send_json_error(
+                        send, 413, "Request body is too large."
+                    )
+                    return
+            except ValueError:
+                await self.send_json_error(send, 400, "Invalid Content-Length.")
+                return
+
+        received_bytes = 0
+        response_started = False
+
+        async def limited_receive():
+            nonlocal received_bytes
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body", b""))
+                if received_bytes > self.max_body_bytes:
+                    raise RequestBodyTooLarge()
+            return message
+
+        async def limited_send(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, limited_send)
+        except RequestBodyTooLarge:
+            if response_started:
+                raise
+            await self.send_json_error(send, 413, "Request body is too large.")
+
+    @staticmethod
+    async def send_json_error(send, status_code, message):
+        payload = json_dumps({"error": message}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status_code,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(payload)).encode()),
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"same-origin"),
+                    (b"cache-control", b"no-store"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
 
 
 def public_url(path):
@@ -92,6 +167,8 @@ def init_storage():
               config_json TEXT NOT NULL,
               status TEXT NOT NULL,
               latest_artifact_path TEXT,
+              source_revision INTEGER NOT NULL DEFAULT 0,
+              processed_revision INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -113,10 +190,34 @@ def init_storage():
             );
             """
         )
+        ensure_data_sink_revision_columns(db)
+
+
+def ensure_data_sink_revision_columns(db):
+    columns = {
+        row["name"]
+        for row in db.execute("PRAGMA table_info(data_sinks)").fetchall()
+    }
+    if "source_revision" not in columns:
+        db.execute(
+            "ALTER TABLE data_sinks ADD COLUMN source_revision INTEGER NOT NULL DEFAULT 0"
+        )
+    if "processed_revision" not in columns:
+        db.execute(
+            "ALTER TABLE data_sinks ADD COLUMN processed_revision INTEGER NOT NULL DEFAULT 0"
+        )
+
+
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 def connect_db():
-    db = sqlite3.connect(DB_PATH)
+    db = sqlite3.connect(DB_PATH, factory=ClosingConnection)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     return db
@@ -218,6 +319,8 @@ def load_sink(db, sink_id):
         "config": json.loads(row["config_json"]),
         "status": row["status"],
         "latestArtifactPath": row["latest_artifact_path"],
+        "sourceRevision": row["source_revision"],
+        "processedRevision": row["processed_revision"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
@@ -236,7 +339,22 @@ def read_all_rows(db, sink_id):
     return rows
 
 
-def write_artifact(db, sink, data):
+def write_artifact(db, sink, data, expected_revision=None):
+    revision = (
+        expected_revision
+        if expected_revision is not None
+        else sink.get("sourceRevision", 0)
+    )
+    current_revision = db.execute(
+        "SELECT source_revision FROM data_sinks WHERE id = ?", (sink["id"],)
+    ).fetchone()
+    if (
+        expected_revision is not None
+        and current_revision
+        and current_revision["source_revision"] != expected_revision
+    ):
+        return None
+
     artifact_id = new_id("art")
     artifact_path = sink_dir(sink["id"]) / "processed" / f"{artifact_id}.json"
     ensure_private_dir(artifact_path.parent)
@@ -255,23 +373,50 @@ def write_artifact(db, sink, data):
         "INSERT INTO artifacts (id, sink_id, artifact_path, kind, created_at) VALUES (?, ?, ?, ?, ?)",
         (artifact_id, sink["id"], str(artifact_path), "latest", created_at),
     )
-    db.execute(
-        "UPDATE data_sinks SET latest_artifact_path = ?, status = ?, updated_at = ? WHERE id = ?",
-        (str(artifact_path), "ready", created_at, sink["id"]),
+    result = db.execute(
+        """
+        UPDATE data_sinks
+        SET latest_artifact_path = ?,
+            status = ?,
+            updated_at = ?,
+            processed_revision = ?
+        WHERE id = ? AND source_revision = ?
+        """,
+        (str(artifact_path), "ready", created_at, revision, sink["id"], revision),
     )
+    if result.rowcount != 1:
+        db.execute("DELETE FROM artifacts WHERE id = ?", (artifact_id,))
+        try:
+            artifact_path.unlink()
+        except FileNotFoundError:
+            pass
+        return None
     return artifact_path
 
 
 def mark_sink_processing(db, sink_id):
+    updated_at = now_iso()
     db.execute(
-        "UPDATE data_sinks SET status = ?, updated_at = ? WHERE id = ?",
-        ("processing", now_iso(), sink_id),
+        """
+        UPDATE data_sinks
+        SET status = ?,
+            updated_at = ?,
+            source_revision = source_revision + 1
+        WHERE id = ?
+        """,
+        ("processing", updated_at, sink_id),
     )
+    row = db.execute(
+        "SELECT source_revision FROM data_sinks WHERE id = ?", (sink_id,)
+    ).fetchone()
+    return row["source_revision"] if row else None
 
 
-def schedule_artifact_rebuild(sink_id):
+def schedule_artifact_rebuild(sink_id, revision):
     cancel_scheduled_rebuild(sink_id)
-    timer = threading.Timer(PROCESS_DEBOUNCE_SECONDS, process_pending_sink, args=(sink_id,))
+    timer = threading.Timer(
+        PROCESS_DEBOUNCE_SECONDS, process_pending_sink, args=(sink_id, revision)
+    )
     timer.daemon = True
     with PROCESS_TIMERS_LOCK:
         PROCESS_TIMERS[sink_id] = timer
@@ -291,7 +436,7 @@ def is_rebuild_scheduled(sink_id):
     return bool(timer and timer.is_alive())
 
 
-def process_pending_sink(sink_id):
+def process_pending_sink(sink_id, expected_revision):
     with PROCESS_TIMERS_LOCK:
         PROCESS_TIMERS.pop(sink_id, None)
     try:
@@ -300,15 +445,24 @@ def process_pending_sink(sink_id):
             if not sink:
                 return
             rows = read_all_rows(db, sink_id)
-            write_artifact(db, sink, process_records(sink, rows))
+            write_artifact(
+                db,
+                sink,
+                process_records(sink, rows),
+                expected_revision=expected_revision,
+            )
             db.commit()
     except Exception as error:
         print(f"Failed to process {sink_id}: {error}", file=sys.stderr)
         try:
             with connect_db() as db:
                 db.execute(
-                    "UPDATE data_sinks SET status = ?, updated_at = ? WHERE id = ?",
-                    ("error", now_iso(), sink_id),
+                    """
+                    UPDATE data_sinks
+                    SET status = ?, updated_at = ?
+                    WHERE id = ? AND source_revision = ?
+                    """,
+                    ("error", now_iso(), sink_id, expected_revision),
                 )
                 db.commit()
         except Exception as nested_error:
@@ -510,6 +664,7 @@ def sample_value_for_type(field_type):
 
 
 app = FastAPI(title="Data Graph", docs_url=None, redoc_url=None)
+app.add_middleware(BodyLimitMiddleware, max_body_bytes=MAX_BODY_BYTES)
 
 
 @app.exception_handler(HTTPException)
@@ -529,20 +684,6 @@ def startup():
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length:
-        try:
-            if int(content_length) > MAX_BODY_BYTES:
-                return JSONResponse(
-                    {"error": "Request body is too large."},
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                )
-        except ValueError:
-            return JSONResponse(
-                {"error": "Invalid Content-Length."},
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
-
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "same-origin"
@@ -666,10 +807,10 @@ def create_data_graph(payload: dict = Body(...)):
         sink = load_sink(db, graph_id)
         if rows:
             persist_batch(db, sink, rows)
-            mark_sink_processing(db, graph_id)
+            revision = mark_sink_processing(db, graph_id)
         db.commit()
     if rows:
-        schedule_artifact_rebuild(graph_id)
+        schedule_artifact_rebuild(graph_id, revision)
 
     return {
         "dataGraphId": graph_id,
@@ -742,9 +883,9 @@ def append_rows(graph_id: str, payload: dict = Body(...)):
             raise HTTPException(status_code=400, detail=str(error)) from error
 
         batch_id = persist_batch(db, sink, rows)
-        mark_sink_processing(db, graph_id)
+        revision = mark_sink_processing(db, graph_id)
         db.commit()
-    schedule_artifact_rebuild(graph_id)
+    schedule_artifact_rebuild(graph_id, revision)
 
     return {
         "dataGraphId": graph_id,
@@ -779,8 +920,14 @@ def update_schema(graph_id: str, payload: dict = Body(...)):
             "UPDATE data_sinks SET name = ?, config_json = ?, updated_at = ? WHERE id = ?",
             (config["name"], json_dumps(config), updated_at, graph_id),
         )
+        revision = mark_sink_processing(db, graph_id)
         updated_sink = load_sink(db, graph_id)
-        write_artifact(db, updated_sink, process_records(updated_sink, existing_rows))
+        write_artifact(
+            db,
+            updated_sink,
+            process_records(updated_sink, existing_rows),
+            expected_revision=revision,
+        )
         db.commit()
 
     return {"dataGraphId": graph_id, "viewUrl": public_url(f"/clusters/{graph_id}")}
@@ -815,14 +962,18 @@ def clear_rows(graph_id: str):
 
         db.execute("DELETE FROM data_batches WHERE sink_id = ?", (graph_id,))
         db.execute("DELETE FROM artifacts WHERE sink_id = ?", (graph_id,))
-        artifact_path = write_artifact(db, sink, [])
+        revision = mark_sink_processing(db, graph_id)
+        updated_sink = load_sink(db, graph_id)
+        artifact_path = write_artifact(
+            db, updated_sink, [], expected_revision=revision
+        )
         db.commit()
 
     return {
         "dataGraphId": graph_id,
         "cleared": True,
         "rowCount": 0,
-        "artifactPath": artifact_path.name,
+        "artifactPath": artifact_path.name if artifact_path else None,
         "viewUrl": public_url(f"/clusters/{graph_id}"),
     }
 
@@ -846,6 +997,16 @@ def serve_root():
 
 if (PUBLIC_ROOT / "assets").exists():
     app.mount("/assets", StaticFiles(directory=PUBLIC_ROOT / "assets"), name="assets")
+
+
+@app.get("/sample-data/{sample_name}")
+def serve_sample_data(sample_name: str):
+    if sample_name not in PUBLIC_SAMPLE_FILES:
+        raise HTTPException(status_code=404, detail="Sample data not found.")
+    path = ROOT / "sample-data" / sample_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Sample data not found.")
+    return FileResponse(path, media_type="application/json")
 
 
 def main():
