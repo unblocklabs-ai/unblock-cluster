@@ -7,6 +7,15 @@ import VectorLayer from "ol/layer/Vector";
 import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, Stroke, Style, Text } from "ol/style";
 import { boundingExtent } from "ol/extent";
+import {
+  INSPECTOR_WIDTH_KEY,
+  boundedInspectorWidth,
+  recordImageUrlForField,
+  savedInspectorWidth,
+  selectionFromSearch,
+  selectionSearchParams,
+} from "./uiState.js";
+import sampleManifest from "../sample-manifest.json";
 
 const state = {
   dataset: null,
@@ -42,6 +51,8 @@ const els = {
   mapShell: document.querySelector("#mapShell"),
   listShell: document.querySelector("#listShell"),
   listContent: document.querySelector("#listContent"),
+  inspector: document.querySelector(".inspector"),
+  inspectorResizer: document.querySelector("#inspectorResizer"),
   stats: document.querySelector("#stats"),
   legend: document.querySelector("#legend"),
   details: document.querySelector("#details"),
@@ -60,7 +71,7 @@ async function loadDataset() {
     let token = tokenFromUrl() || sessionStorage.getItem("dataGraphApiToken");
     const datasetUrl = graphId
       ? `/api/data-graph/${encodeURIComponent(graphId)}/artifact/latest`
-      : "./sample-data/commerce.json";
+      : sampleManifest.defaultSamplePath;
     if (graphId && !token) {
       token = promptForToken("Enter the API token to open this private cluster.");
       if (!token) throw new Error("Missing API token.");
@@ -126,6 +137,7 @@ function loadRecords(payload) {
   }));
   state.fields = collectFields(state.records);
   state.clusters = buildClusters(state.records);
+  state.selected = selectionFromUrl();
 
   renderChrome();
   renderLegend();
@@ -196,7 +208,17 @@ function renderChrome() {
 }
 
 function renderLegend() {
-  els.legend.innerHTML = "";
+  els.legend.innerHTML = state.clusters
+    .map(
+      (cluster) => `
+        <button class="legend-item" type="button" data-cluster="${escapeHtml(cluster.id)}" aria-pressed="${state.selected?.type === "cluster" && state.selected.value.id === cluster.id ? "true" : "false"}">
+          <span class="swatch" style="background:${cluster.color}"></span>
+          <span>${escapeHtml(cluster.name)}</span>
+          <span>${cluster.items.length}</span>
+        </button>
+      `,
+    )
+    .join("");
 }
 
 function renderList() {
@@ -220,13 +242,21 @@ function renderList() {
 function renderRecordCard(record) {
   return `
     <button class="record-card" type="button" data-record="${record.__index}">
-      <span class="thumb color-thumb" style="background:${clusterForRecord(record)?.color || "#d9ddd8"}"></span>
+      ${renderRecordThumb(record)}
       <span>
         <strong>${escapeHtml(record[state.dataset.titleField])}</strong>
         <span>${escapeHtml(record[state.dataset.detailField])}</span>
       </span>
     </button>
   `;
+}
+
+function renderRecordThumb(record) {
+  const imageUrl = recordImageUrl(record);
+  if (imageUrl) {
+    return `<img class="thumb" src="${escapeHtml(imageUrl)}" alt="" loading="lazy">`;
+  }
+  return `<span class="thumb color-thumb" style="background:${clusterForRecord(record)?.color || "#d9ddd8"}"></span>`;
 }
 
 function renderDetails() {
@@ -259,14 +289,17 @@ function renderDetails() {
   }
 
   const record = state.selected.value;
+  const imageField = state.dataset.imageField;
+  const imageUrl = recordImageUrl(record);
   els.details.innerHTML = `
+    ${imageUrl ? `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(record[state.dataset.titleField])}" loading="lazy">` : ""}
     <div>
       <p class="detail-meta">${escapeHtml(record.__clusterLabel || record.clusterLabel || "")} · ${escapeHtml(record.__groupValue || record.groupValue || "")}</p>
       <h2>${escapeHtml(record[state.dataset.titleField])}</h2>
       <p class="record-detail">${escapeHtml(record[state.dataset.detailField])}</p>
     </div>
     <div class="field-table">
-      ${state.fields
+      ${visibleDetailFields(imageField, imageUrl)
         .map(
           (field) => `
         <div class="field-row">
@@ -330,17 +363,10 @@ function renderMap() {
     if (!feature) return;
     const cluster = feature.get("cluster");
     if (cluster && !feature.get("record")) {
-      state.selected = { type: "cluster", value: cluster };
-      renderDetails();
-      state.layer.changed();
-      state.labelLayer.changed();
-      fitMap(cluster);
+      setSelection({ type: "cluster", value: cluster });
       return;
     }
-    state.selected = { type: "record", value: feature.get("record") };
-    renderDetails();
-    state.layer.changed();
-    state.labelLayer.changed();
+    setSelection({ type: "record", value: feature.get("record") });
   });
 
   state.map.getView().on("change:resolution", () => {
@@ -348,7 +374,11 @@ function renderMap() {
     state.labelLayer.changed();
   });
 
-  fitMap();
+  if (state.selected) {
+    focusSelection(false);
+  } else {
+    fitMap();
+  }
 }
 
 function styleFeature(feature) {
@@ -427,6 +457,30 @@ function clusterForRecord(record) {
   );
 }
 
+function recordImageUrl(record) {
+  return recordImageUrlForField(
+    record,
+    state.dataset?.imageField,
+    window.location.href,
+  );
+}
+
+function visibleDetailFields(imageField, imageUrl) {
+  const hiddenFields = new Set([
+    "clusterId",
+    "clusterLabel",
+    "groupValue",
+    "x",
+    "y",
+    state.dataset.titleField,
+    state.dataset.detailField,
+  ]);
+  return state.fields.filter((field) => {
+    if (hiddenFields.has(field)) return false;
+    return field !== imageField || !imageUrl;
+  });
+}
+
 function normalizeDataset(payload) {
   if (payload?.config?.dataSchema) return normalizeConfiguredDataset(payload);
   return normalizeLegacyDataset(payload);
@@ -463,6 +517,7 @@ function normalizeConfiguredDataset(payload) {
     groupingFields,
     titleField,
     detailField,
+    imageField: config.imageField || payload.imageField,
     records: ensureLayout(records, groupingFields),
   };
 }
@@ -490,6 +545,7 @@ function normalizeLegacyDataset(payload) {
         "summary",
         "description",
       ]),
+    imageField: payload.imageField,
     records: ensureLayout(records, groupingFields),
   };
 }
@@ -587,6 +643,100 @@ function setMode(mode) {
   }
 }
 
+function selectionFromUrl() {
+  return selectionFromSearch(
+    window.location.search,
+    state.records,
+    state.clusters,
+  );
+}
+
+function setSelection(selection, { updateUrl = true, focus = true } = {}) {
+  state.selected = selection;
+  if (updateUrl) syncSelectionToUrl();
+  renderSelection(focus);
+}
+
+function renderSelection(focus = true) {
+  renderLegend();
+  renderDetails();
+  state.layer?.changed();
+  state.labelLayer?.changed();
+  if (focus) focusSelection();
+}
+
+function focusSelection(animate = true) {
+  if (!state.map || !state.selected) return;
+  if (state.selected.type === "cluster") {
+    fitMap(state.selected.value);
+    return;
+  }
+  const record = state.selected.value;
+  const view = state.map.getView();
+  if (animate) {
+    view.animate({ center: [record.x, record.y], zoom: 16, duration: 260 });
+  } else {
+    view.setCenter([record.x, record.y]);
+    view.setZoom(16);
+  }
+}
+
+function syncSelectionToUrl() {
+  const url = new URL(window.location.href);
+  url.search = selectionSearchParams(url.search, state.selected).toString();
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function restoreSelectionFromUrl() {
+  state.selected = selectionFromUrl();
+  renderSelection();
+}
+
+function initInspectorResize() {
+  const savedWidth = savedInspectorWidth(
+    localStorage.getItem(INSPECTOR_WIDTH_KEY),
+  );
+  if (savedWidth !== null) {
+    setInspectorWidth(savedWidth);
+  }
+  if (!els.inspector || !els.inspectorResizer) return;
+
+  let startX = 0;
+  let startWidth = 0;
+
+  els.inspectorResizer.addEventListener("pointerdown", (event) => {
+    if (window.matchMedia("(max-width: 1120px)").matches) return;
+    startX = event.clientX;
+    startWidth = els.inspector.getBoundingClientRect().width;
+    document.body.classList.add("is-resizing-inspector");
+    els.inspectorResizer.setPointerCapture(event.pointerId);
+  });
+
+  els.inspectorResizer.addEventListener("pointermove", (event) => {
+    if (!document.body.classList.contains("is-resizing-inspector")) return;
+    const nextWidth = startWidth + startX - event.clientX;
+    setInspectorWidth(nextWidth);
+  });
+
+  els.inspectorResizer.addEventListener("pointerup", (event) => {
+    if (!document.body.classList.contains("is-resizing-inspector")) return;
+    document.body.classList.remove("is-resizing-inspector");
+    els.inspectorResizer.releasePointerCapture(event.pointerId);
+    const width = Math.round(els.inspector.getBoundingClientRect().width);
+    localStorage.setItem(INSPECTOR_WIDTH_KEY, String(width));
+    state.map?.updateSize();
+  });
+}
+
+function setInspectorWidth(width) {
+  const nextWidth = boundedInspectorWidth(width, window.innerWidth);
+  document.documentElement.style.setProperty(
+    "--inspector-width",
+    `${Math.round(nextWidth)}px`,
+  );
+  state.map?.updateSize();
+}
+
 function formatValue(value) {
   if (Array.isArray(value)) return value.join(", ");
   if (value && typeof value === "object") return JSON.stringify(value);
@@ -626,11 +776,7 @@ els.legend.addEventListener("click", (event) => {
     (entry) => entry.id === button.dataset.cluster,
   );
   if (!cluster) return;
-  state.selected = { type: "cluster", value: cluster };
-  renderDetails();
-  state.layer.changed();
-  state.labelLayer.changed();
-  fitMap(cluster);
+  setSelection({ type: "cluster", value: cluster });
 });
 
 document.addEventListener("click", (event) => {
@@ -640,15 +786,10 @@ document.addEventListener("click", (event) => {
     (entry) => String(entry.__index) === recordButton.dataset.record,
   );
   if (!record) return;
-  state.selected = { type: "record", value: record };
-  renderDetails();
-  state.layer.changed();
-  state.labelLayer.changed();
-  if (state.mode === "map") {
-    state.map
-      .getView()
-      .animate({ center: [record.x, record.y], zoom: 16, duration: 260 });
-  }
+  setSelection({ type: "record", value: record }, { focus: state.mode === "map" });
 });
 
+window.addEventListener("popstate", restoreSelectionFromUrl);
+
+initInspectorResize();
 loadDataset();

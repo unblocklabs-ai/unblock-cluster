@@ -7,7 +7,7 @@
     "dev": "vite --host 127.0.0.1 --port 4173",
     "build": "vite build",
     "serve": ".venv/bin/python server.py",
-    "check": "node --check src/app.js && .venv/bin/python -m py_compile server.py processor.py"
+    "check": "node --check src/app.js && node --check src/urlPolicy.js && node --check src/uiState.js && node --test tests/*.test.mjs && .venv/bin/python -m py_compile server.py processor.py tests/test_server_regressions.py && .venv/bin/python -m unittest tests/test_server_regressions.py"
   },
   "dependencies": {
     "@vitejs/plugin-basic-ssl": "^2.3.0",
