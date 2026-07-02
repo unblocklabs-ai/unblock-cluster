@@ -34,7 +34,7 @@ class ServerRegressionTests(unittest.TestCase):
         os.environ["DATA_GRAPH_ENV"] = str(temp_path / "missing.env")
         os.environ["DATA_GRAPH_STORAGE"] = str(temp_path / "storage")
         os.environ["DATA_GRAPH_DB"] = str(temp_path / "test.sqlite3")
-        os.environ["DATA_GRAPH_API_TOKEN"] = "test-token"
+        os.environ["DATA_GRAPH_API_TOKEN"] = os.urandom(16).hex()
         for key in (
             "OPENAI_API_KEY",
             "DATA_GRAPH_TEXT_FEATURE_METHOD",
@@ -164,10 +164,132 @@ class ServerRegressionTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 404)
 
     def test_frontend_default_sample_is_allowlisted(self):
-        manifest = json.loads((self.server.ROOT / "sample-manifest.json").read_text())
+        manifest = json.loads(
+            (self.server.ROOT / "sample-manifest.json").read_text(encoding="utf-8")
+        )
         default_sample = Path(manifest["defaultSamplePath"]).name
 
         self.assertIn(default_sample, self.server.PUBLIC_SAMPLE_FILES)
+
+    def test_load_sink_rejects_invalid_stored_config_json(self):
+        graph_id = self.server.new_id("dg")
+        now = self.server.now_iso()
+        with self.server.connect_db() as db:
+            db.execute(
+                """
+                INSERT INTO data_sinks
+                  (id, name, config_json, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (graph_id, "Broken Config", "{", "created", now, now),
+            )
+            db.commit()
+
+            with self.assertRaises(self.server.StoredDataError) as context:
+                self.server.load_sink(db, graph_id)
+
+        self.assertIn("Stored config", str(context.exception))
+
+    def test_read_all_rows_rejects_invalid_stored_batch_json(self):
+        graph_id = self.server.new_id("dg")
+        batch_path = self.server.sink_dir(graph_id) / "raw" / "broken.json"
+        self.server.ensure_private_dir(batch_path.parent)
+        batch_path.write_text("{", encoding="utf-8")
+        now = self.server.now_iso()
+        config = {
+            "name": "Broken Batch",
+            "dataSchema": {"name": "String"},
+            "groupingFields": ["name"],
+        }
+        with self.server.connect_db() as db:
+            db.execute(
+                """
+                INSERT INTO data_sinks
+                  (id, name, config_json, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    graph_id,
+                    config["name"],
+                    self.server.json_dumps(config),
+                    "created",
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO data_batches
+                  (id, sink_id, raw_path, row_count, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (self.server.new_id("batch"), graph_id, str(batch_path), 0, now),
+            )
+            db.commit()
+
+            with self.assertRaises(self.server.StoredDataError) as context:
+                self.server.read_all_rows(db, graph_id)
+
+        self.assertIn("Stored data batch", str(context.exception))
+
+    def test_read_all_rows_rejects_wrong_stored_batch_shape(self):
+        graph_id = self.server.new_id("dg")
+        batch_path = self.server.sink_dir(graph_id) / "raw" / "wrong-shape.json"
+        self.server.ensure_private_dir(batch_path.parent)
+        batch_path.write_text("[]", encoding="utf-8")
+        now = self.server.now_iso()
+        config = {
+            "name": "Wrong Shape Batch",
+            "dataSchema": {"name": "String"},
+            "groupingFields": ["name"],
+        }
+        with self.server.connect_db() as db:
+            db.execute(
+                """
+                INSERT INTO data_sinks
+                  (id, name, config_json, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    graph_id,
+                    config["name"],
+                    self.server.json_dumps(config),
+                    "created",
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO data_batches
+                  (id, sink_id, raw_path, row_count, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (self.server.new_id("batch"), graph_id, str(batch_path), 0, now),
+            )
+            db.commit()
+
+            with self.assertRaises(self.server.StoredDataError) as context:
+                self.server.read_all_rows(db, graph_id)
+
+        self.assertIn("data array", str(context.exception))
+
+    def test_latest_artifact_rejects_invalid_stored_json(self):
+        graph_id = self.server.new_id("dg")
+        artifact_path = self.server.sink_dir(graph_id) / "processed" / "broken.json"
+        self.server.ensure_private_dir(artifact_path.parent)
+        artifact_path.write_text("{", encoding="utf-8")
+
+        with self.assertRaises(HTTPException) as context:
+            self.server.latest_artifact_payload(
+                {
+                    "config": {"name": "Broken Artifact"},
+                    "latestArtifactPath": str(artifact_path),
+                }
+            )
+
+        self.assertEqual(context.exception.status_code, 500)
+        self.assertEqual(context.exception.detail, "Stored artifact is invalid.")
 
     def test_invalid_cluster_config_is_rejected(self):
         with self.assertRaises(ValueError) as context:
@@ -474,10 +596,15 @@ class ServerRegressionTests(unittest.TestCase):
         with self.server.connect_db() as db:
             cache = self.server.SqliteEmbeddingCache(db)
             self.assertEqual(cache.get_many("openai", "model", 2, ["abc"]), {})
-            cache.set_many("openai", "model", 2, {"abc": [1.0, 2.0]})
+            cache.set_many(
+                "openai",
+                "model",
+                2,
+                {"abc": [1.0, 2.0], "def": [3.0, 4.0]},
+            )
             self.assertEqual(
-                cache.get_many("openai", "model", 2, ["abc"]),
-                {"abc": [1.0, 2.0]},
+                cache.get_many("openai", "model", 2, ["abc", "def", "missing"]),
+                {"abc": [1.0, 2.0], "def": [3.0, 4.0]},
             )
 
     def test_processor_metadata_does_not_expose_api_key(self):

@@ -1,13 +1,20 @@
 import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "data_graph_import.py"
+SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPTS_ROOT))
+SCRIPT_PATH = SCRIPTS_ROOT / "data_graph_import.py"
+EXPORT_SCRIPT_PATH = SCRIPTS_ROOT / "data_graph_export.py"
 SPEC = importlib.util.spec_from_file_location("data_graph_import", SCRIPT_PATH)
 data_graph_import = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(data_graph_import)
+EXPORT_SPEC = importlib.util.spec_from_file_location("data_graph_export", EXPORT_SCRIPT_PATH)
+data_graph_export = importlib.util.module_from_spec(EXPORT_SPEC)
+EXPORT_SPEC.loader.exec_module(data_graph_export)
 
 
 class DataGraphImportScriptTests(unittest.TestCase):
@@ -21,7 +28,8 @@ class DataGraphImportScriptTests(unittest.TestCase):
                         'r-1,42,true,"{""tier"": ""gold""}","[""urgent""]"',
                     ]
                 )
-                + "\n"
+                + "\n",
+                encoding="utf-8",
             )
 
             rows = data_graph_import.load_rows(
@@ -65,7 +73,8 @@ class DataGraphImportScriptTests(unittest.TestCase):
                         "SUP-1, Login issue ,Platform,OAuth callback fails,false",
                     ]
                 )
-                + "\n"
+                + "\n",
+                encoding="utf-8",
             )
 
             rows = data_graph_import.load_rows(
@@ -91,6 +100,32 @@ class DataGraphImportScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(row, {"title": "Hello"})
+
+    def test_json_input_errors_are_reported_before_request(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "rows.json"
+            path.write_text("{", encoding="utf-8")
+
+            with self.assertRaises(SystemExit) as context:
+                data_graph_import.load_rows(path, "json")
+
+        self.assertIn("not valid JSON", str(context.exception))
+
+    def test_base_url_must_be_http_or_https(self):
+        self.assertEqual(
+            data_graph_import.validated_base_url("http://127.0.0.1:8080/"),
+            "http://127.0.0.1:8080",
+        )
+        self.assertEqual(
+            data_graph_export.validated_base_url("https://example.test/api/"),
+            "https://example.test/api",
+        )
+
+        with self.assertRaises(SystemExit):
+            data_graph_import.validated_base_url("file:///tmp/data.json")
+
+        with self.assertRaises(SystemExit):
+            data_graph_export.validated_base_url("ftp://example.test/data")
 
 
 if __name__ == "__main__":
