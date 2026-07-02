@@ -8,16 +8,16 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from data_graph_cli import get_json, load_env, validated_base_url
 
-def load_env(path):
-    if not path or not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+def load_json_file(path, context):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise SystemExit(f"{context} could not be read: {path}") from error
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"{context} is not valid JSON: {path}") from error
 
 
 def load_rows(path, data_format, schema=None):
@@ -32,7 +32,7 @@ def load_rows(path, data_format, schema=None):
             data_format = "json"
 
     if data_format == "json":
-        payload = json.loads(path.read_text())
+        payload = load_json_file(path, "JSON input")
         if isinstance(payload, dict) and isinstance(payload.get("data"), list):
             return payload["data"]
         if isinstance(payload, list):
@@ -41,13 +41,16 @@ def load_rows(path, data_format, schema=None):
 
     if data_format == "jsonl":
         rows = []
-        for line in path.read_text().splitlines():
+        for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if line.strip():
-                rows.append(json.loads(line))
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError as error:
+                    raise SystemExit(f"JSONL line {index} is not valid JSON.") from error
         return rows
 
     if data_format == "csv":
-        with path.open(newline="") as handle:
+        with path.open(newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
         if schema:
             return [coerce_row(row, schema) for row in rows]
@@ -96,16 +99,6 @@ def coerce_value(value, field_type):
     return value
 
 
-def get_json(url, token):
-    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.loads(response.read().decode())
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode(errors="replace")
-        raise SystemExit(f"GET {url} failed: {error.code} {detail}") from error
-
-
 def request_json(method, url, token, payload):
     body = json.dumps(payload).encode()
     request = urllib.request.Request(
@@ -118,12 +111,19 @@ def request_json(method, url, token, payload):
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return json.loads(response.read().decode())
+        # URL comes from --base-url after validated_base_url restricts it to HTTP(S).
+        with urllib.request.urlopen(  # nosec B310
+            request,
+            timeout=60,
+        ) as response:
+            return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        detail = error.read().decode(errors="replace")
+        detail = error.read().decode("utf-8", errors="replace")
         raise SystemExit(f"{method} {url} failed: {error.code} {detail}") from error
-
+    except urllib.error.URLError as error:
+        raise SystemExit(f"{method} {url} failed: {error.reason}") from error
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"{method} {url} returned invalid JSON.") from error
 
 def main():
     parser = argparse.ArgumentParser(description="Import JSON, JSONL, or CSV rows into Data Graph.")
@@ -141,7 +141,7 @@ def main():
     if not token:
         raise SystemExit("Provide --token or set DATA_GRAPH_API_TOKEN in .env.")
 
-    base_url = args.base_url.rstrip("/")
+    base_url = validated_base_url(args.base_url)
     if args.graph_id:
         schema = None
         if args.format == "csv" or (args.format == "auto" and args.data.suffix.lower() == ".csv"):
@@ -152,7 +152,7 @@ def main():
     else:
         if not args.config:
             raise SystemExit("--config is required when --graph-id is not provided.")
-        config = json.loads(args.config.read_text())
+        config = load_json_file(args.config, "Config JSON")
         if "config" in config:
             config = config["config"]
         rows = load_rows(args.data, args.format, schema=config.get("dataSchema"))

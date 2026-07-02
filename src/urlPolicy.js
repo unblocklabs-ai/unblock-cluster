@@ -1,6 +1,6 @@
-export const trustedImageHosts = new Set(["images.unsplash.com"]);
-export const trustedSameOriginImagePrefixes = ["/assets/", "/sample-data/"];
-export const trustedImageExtensions = new Set([
+const trustedImageHosts = new Set(["images.unsplash.com"]);
+const trustedSameOriginImagePrefixes = ["/assets/", "/sample-data/"];
+const trustedImageExtensions = new Set([
   ".avif",
   ".gif",
   ".jpeg",

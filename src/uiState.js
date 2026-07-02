@@ -1,9 +1,9 @@
 import { trustedImageUrl } from "./urlPolicy.js";
 
 export const INSPECTOR_WIDTH_KEY = "dataAtlasInspectorWidth";
-export const INSPECTOR_MIN_WIDTH = 320;
-export const INSPECTOR_MAX_WIDTH = 620;
-export const DEFAULT_LEGEND_VISIBLE_LIMIT = 12;
+const INSPECTOR_MIN_WIDTH = 320;
+const INSPECTOR_MAX_WIDTH = 620;
+const DEFAULT_LEGEND_VISIBLE_LIMIT = 12;
 
 export function capLegendClusters(clusters = [], options = {}) {
   const clustersArray = Array.isArray(clusters) ? clusters : [];

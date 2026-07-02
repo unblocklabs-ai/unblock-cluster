@@ -137,15 +137,19 @@ class ProcessorEmbeddingTests(unittest.TestCase):
         original_reduce = processor.reduce_to_points
         original_cluster = processor.cluster_points
         try:
-            processor.reduce_to_points = lambda features: np.asarray(
-                [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
-            )
-            processor.cluster_points = lambda points, row_count, cluster_config: np.asarray(
-                [0, 0, 1]
-            )
-            fake_embed = lambda inputs, options: [
-                [float(index), float(index + 1)] for index, _ in enumerate(inputs)
-            ]
+            def fake_reduce_to_points(features):
+                return np.asarray([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+            def fake_cluster_points(points, row_count, cluster_config):
+                return np.asarray([0, 0, 1])
+
+            def fake_embed(inputs, options):
+                return [
+                    [float(index), float(index + 1)] for index, _ in enumerate(inputs)
+                ]
+
+            processor.reduce_to_points = fake_reduce_to_points
+            processor.cluster_points = fake_cluster_points
             metadata = {}
             rows = processor.process_records(
                 {

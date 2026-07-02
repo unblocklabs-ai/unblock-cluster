@@ -11,7 +11,7 @@ EXAMPLE_ENV = Path(__file__).resolve().parents[1] / ".env.example"
 def env_lines(path):
     if not path.exists():
         return []
-    return path.read_text().splitlines()
+    return path.read_text(encoding="utf-8").splitlines()
 
 
 def upsert_env_value(lines, key, value):
@@ -44,7 +44,10 @@ def main():
 
     token = secrets.token_hex(32)
     args.env.parent.mkdir(parents=True, exist_ok=True)
-    args.env.write_text("\n".join(upsert_env_value(lines, "DATA_GRAPH_API_TOKEN", token)) + "\n")
+    args.env.write_text(
+        "\n".join(upsert_env_value(lines, "DATA_GRAPH_API_TOKEN", token)) + "\n",
+        encoding="utf-8",
+    )
     try:
         args.env.chmod(0o600)
     except PermissionError:

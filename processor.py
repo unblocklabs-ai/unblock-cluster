@@ -370,7 +370,8 @@ def request_openai_embeddings(inputs, options):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(
+        # Request targets the fixed HTTPS OpenAI embeddings endpoint.
+        with urllib.request.urlopen(  # nosec B310
             request,
             timeout=options["embeddingTimeoutSeconds"],
         ) as response:

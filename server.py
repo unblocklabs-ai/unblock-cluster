@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import sys
 import threading
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,7 +31,7 @@ ENV_PATH = Path(os.environ.get("DATA_GRAPH_ENV", ROOT / ".env")).resolve()
 def load_env_file(path=ENV_PATH):
     if not path.exists():
         return
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
@@ -42,6 +43,19 @@ def load_env_file(path=ENV_PATH):
 
 
 load_env_file()
+
+
+class StoredDataError(RuntimeError):
+    pass
+
+
+def read_json_file(path, context):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise StoredDataError(f"{context} could not be read.") from error
+    except json.JSONDecodeError as error:
+        raise StoredDataError(f"{context} is not valid JSON.") from error
 
 DATA_ROOT = Path(os.environ.get("DATA_GRAPH_STORAGE", ROOT / "local-data")).resolve()
 DB_PATH = Path(
@@ -93,7 +107,7 @@ SECRET_CONFIG_VALUE_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 ID_PATTERN = re.compile(r"^dg_[A-Za-z0-9_-]{16,64}$")
 PROCESS_TIMERS = {}
 PROCESS_TIMERS_LOCK = threading.Lock()
-SAMPLE_MANIFEST = json.loads((ROOT / "sample-manifest.json").read_text())
+SAMPLE_MANIFEST = read_json_file(ROOT / "sample-manifest.json", "Sample manifest")
 PUBLIC_SAMPLE_FILES = {
     Path(sample_name).name
     for sample_name in SAMPLE_MANIFEST.get("publicSampleFiles", [])
@@ -773,10 +787,14 @@ def load_sink(db, sink_id):
     row = db.execute("SELECT * FROM data_sinks WHERE id = ?", (sink_id,)).fetchone()
     if not row:
         return None
+    try:
+        config = json.loads(row["config_json"])
+    except json.JSONDecodeError as error:
+        raise StoredDataError(f"Stored config for {sink_id} is not valid JSON.") from error
     return {
         "id": row["id"],
         "name": row["name"],
-        "config": json.loads(row["config_json"]),
+        "config": config,
         "status": row["status"],
         "latestArtifactPath": row["latest_artifact_path"],
         "sourceRevision": row["source_revision"],
@@ -794,8 +812,10 @@ def read_all_rows(db, sink_id):
     ).fetchall()
     for batch in batches:
         batch_path = Path(batch["raw_path"])
-        payload = json.loads(batch_path.read_text())
-        rows.extend(payload.get("data", []))
+        payload = read_json_file(batch_path, "Stored data batch")
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise StoredDataError("Stored data batch must contain a data array.")
+        rows.extend(payload["data"])
     return rows
 
 
@@ -810,23 +830,37 @@ class SqliteEmbeddingCache:
     def get_many(self, provider, model, dimensions, text_hashes):
         if not text_hashes:
             return {}
-        placeholders = ",".join("?" for _ in text_hashes)
-        rows = self.db.execute(
-            f"""
-            SELECT text_hash, embedding_json
-            FROM embedding_cache
-            WHERE provider = ?
-              AND model = ?
-              AND dimensions = ?
-              AND text_hash IN ({placeholders})
-            """,
-            (
-                provider,
-                model,
-                self.dimensions_value(dimensions),
-                *text_hashes,
-            ),
-        ).fetchall()
+        self.db.execute(
+            """
+            CREATE TEMP TABLE IF NOT EXISTS embedding_cache_lookup (
+              text_hash TEXT PRIMARY KEY
+            )
+            """
+        )
+        self.db.execute("DELETE FROM embedding_cache_lookup")
+        try:
+            self.db.executemany(
+                "INSERT OR IGNORE INTO embedding_cache_lookup (text_hash) VALUES (?)",
+                ((text_hash,) for text_hash in text_hashes),
+            )
+            rows = self.db.execute(
+                """
+                SELECT embedding_cache.text_hash, embedding_cache.embedding_json
+                FROM embedding_cache
+                INNER JOIN embedding_cache_lookup
+                  ON embedding_cache_lookup.text_hash = embedding_cache.text_hash
+                WHERE provider = ?
+                  AND model = ?
+                  AND dimensions = ?
+                """,
+                (
+                    provider,
+                    model,
+                    self.dimensions_value(dimensions),
+                ),
+            ).fetchall()
+        finally:
+            self.db.execute("DELETE FROM embedding_cache_lookup")
         embeddings = {}
         for row in rows:
             try:
@@ -937,7 +971,7 @@ def write_artifact(db, sink, data, expected_revision=None, processor_metadata=No
         },
         "data": data,
     }
-    artifact_path.write_text(pretty_json(payload))
+    artifact_path.write_text(pretty_json(payload), encoding="utf-8")
 
     created_at = now_iso()
     db.execute(
@@ -1285,7 +1319,13 @@ def sample_value_for_type(field_type):
     return None
 
 
-app = FastAPI(title="Data Graph", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(app):
+    init_storage()
+    yield
+
+
+app = FastAPI(title="Data Graph", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(BodyLimitMiddleware, max_body_bytes=MAX_BODY_BYTES)
 
 
@@ -1299,9 +1339,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse({"error": "Invalid request body."}, status_code=400)
 
 
-@app.on_event("startup")
-def startup():
-    init_storage()
+@app.exception_handler(StoredDataError)
+async def stored_data_exception_handler(request: Request, exc: StoredDataError):
+    return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.middleware("http")
@@ -1338,7 +1378,7 @@ def require_auth(authorization: str = Header(default="")):
 def persist_batch(db, sink, rows):
     batch_id = new_id("batch")
     batch_path = sink_dir(sink["id"]) / "raw" / f"{batch_id}.json"
-    batch_path.write_text(pretty_json({"data": rows}))
+    batch_path.write_text(pretty_json({"data": rows}), encoding="utf-8")
     created_at = now_iso()
     db.execute(
         "INSERT INTO data_batches (id, sink_id, raw_path, row_count, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1444,7 +1484,10 @@ def latest_artifact_payload(sink):
     artifact_path = Path(sink["latestArtifactPath"]).resolve()
     if DATA_ROOT not in artifact_path.parents or not artifact_path.exists():
         raise HTTPException(status_code=404, detail="Artifact not found.")
-    return json.loads(artifact_path.read_text())
+    try:
+        return read_json_file(artifact_path, "Stored artifact")
+    except StoredDataError as error:
+        raise HTTPException(status_code=500, detail="Stored artifact is invalid.") from error
 
 
 @app.get("/api/help", dependencies=[Depends(require_auth)])
