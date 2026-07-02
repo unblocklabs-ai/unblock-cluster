@@ -54,16 +54,46 @@ def group_value_for_record(record, grouping_fields):
     )
 
 
-def cluster_label(records, label, grouping_fields):
+def most_common_label(records, field, fallback):
+    counts = {}
+    for record in records:
+        value = record.get(field)
+        if value not in (None, ""):
+            text = str(value)
+            counts[text] = counts.get(text, 0) + 1
+    if not counts:
+        return fallback
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def cluster_label(records, label, grouping_fields, cluster_config=None):
+    cluster_config = cluster_config or {}
+    overrides = cluster_config.get("labelOverrides") or {}
+
+    def apply_override(label_name):
+        return str(overrides.get(label_name, label_name))
+
+    if str(label) in overrides:
+        return str(overrides[str(label)])
     if label == -1:
         return "Outliers"
+    strategy = cluster_config.get("labelStrategy", "groupingField")
+    if strategy == "clusterId":
+        return f"Cluster {label}"
+    if strategy == "labelField":
+        label_field = cluster_config.get("labelField")
+        if label_field:
+            return apply_override(
+                most_common_label(records, label_field, f"Cluster {label}")
+            )
     counts = {}
     for record in records:
         value = group_value_for_record(record, grouping_fields)
         counts[value] = counts.get(value, 0) + 1
     if not counts:
         return f"Cluster {label}"
-    return max(counts.items(), key=lambda item: item[1])[0]
+    label_name = max(counts.items(), key=lambda item: item[1])[0]
+    return apply_override(label_name)
 
 
 def default_feature_fields(config):
@@ -211,7 +241,8 @@ def update_metadata(metadata, values):
         metadata.update(values)
 
 
-def metadata_defaults(rows, options, numeric_fields, feature_fields):
+def metadata_defaults(rows, options, numeric_fields, feature_fields, cluster_config=None):
+    cluster_config = cluster_config or {}
     metadata = {
         "recordCount": len(rows),
         "layoutMethod": "PaCMAP",
@@ -220,7 +251,12 @@ def metadata_defaults(rows, options, numeric_fields, feature_fields):
         "numericFields": numeric_fields,
         "featureFields": feature_fields,
         "textFeatureMethod": options["textFeatureMethod"],
+        "clusterLabelStrategy": cluster_config.get("labelStrategy", "groupingField"),
     }
+    if cluster_config.get("labelField"):
+        metadata["clusterLabelField"] = cluster_config["labelField"]
+    if cluster_config.get("labelOverrides"):
+        metadata["clusterLabelOverrideCount"] = len(cluster_config["labelOverrides"])
     if options["textFeatureMethod"] == "embedding":
         metadata.update(
             {
@@ -517,12 +553,12 @@ def cluster_points(points, row_count, cluster_config):
     return hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=2).fit_predict(points)
 
 
-def attach_layout_and_labels(rows, points, labels, grouping_fields):
+def attach_layout_and_labels(rows, points, labels, grouping_fields, cluster_config=None):
     grouped_records = {}
     for record, label in zip(rows, labels):
         grouped_records.setdefault(int(label), []).append(record)
     label_names = {
-        label: cluster_label(cluster_records, label, grouping_fields)
+        label: cluster_label(cluster_records, label, grouping_fields, cluster_config)
         for label, cluster_records in grouped_records.items()
     }
 
@@ -542,7 +578,7 @@ def attach_layout_and_labels(rows, points, labels, grouping_fields):
     return processed
 
 
-def fallback_layout(records, grouping_fields):
+def fallback_layout(records, grouping_fields, cluster_config=None):
     import math
 
     grouped = {}
@@ -552,6 +588,7 @@ def fallback_layout(records, grouping_fields):
     group_count = max(len(groups), 1)
     processed = []
     for group_index, (group_value, items) in enumerate(groups):
+        label = cluster_label(items, group_index, grouping_fields, cluster_config)
         center_angle = (math.pi * 2 * group_index) / group_count
         center_radius = 0 if group_count == 1 else 1200
         center_x = math.cos(center_angle) * center_radius
@@ -565,7 +602,7 @@ def fallback_layout(records, grouping_fields):
                     "x": center_x + math.cos(item_angle) * item_radius,
                     "y": center_y + math.sin(item_angle) * item_radius,
                     "clusterId": group_index,
-                    "clusterLabel": group_value,
+                    "clusterLabel": label,
                     "groupValue": group_value,
                 }
             )
@@ -591,7 +628,7 @@ def process_records(
     feature_fields = [field for field in feature_fields if field in config["dataSchema"]]
     update_metadata(
         processor_metadata,
-        metadata_defaults(rows, options, numeric_fields, feature_fields),
+        metadata_defaults(rows, options, numeric_fields, feature_fields, cluster_config),
     )
 
     if not rows:
@@ -603,7 +640,7 @@ def process_records(
             processor_metadata,
             {"fallbackUsed": True, "fallbackReason": "row_count_below_3"},
         )
-        return fallback_layout(rows, grouping_fields)
+        return fallback_layout(rows, grouping_fields, cluster_config)
 
     try:
         import numpy as np
@@ -623,13 +660,13 @@ def process_records(
                 processor_metadata,
                 {"fallbackUsed": True, "fallbackReason": "no_feature_values"},
             )
-            return fallback_layout(rows, grouping_fields)
+            return fallback_layout(rows, grouping_fields, cluster_config)
 
         features = np.concatenate(feature_parts, axis=1)
         update_metadata(processor_metadata, {"featureDimensions": int(features.shape[1])})
         points = reduce_to_points(features)
         labels = cluster_points(points, len(rows), cluster_config)
-        return attach_layout_and_labels(rows, points, labels, grouping_fields)
+        return attach_layout_and_labels(rows, points, labels, grouping_fields, cluster_config)
     except EmbeddingProcessingError:
         raise
     except ProcessingError:
@@ -642,4 +679,4 @@ def process_records(
             processor_metadata,
             {"fallbackUsed": True, "fallbackReason": "algorithm_failure"},
         )
-        return fallback_layout(rows, grouping_fields)
+        return fallback_layout(rows, grouping_fields, cluster_config)

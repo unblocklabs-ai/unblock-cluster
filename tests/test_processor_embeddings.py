@@ -192,6 +192,25 @@ class ProcessorEmbeddingTests(unittest.TestCase):
         self.assertEqual(metadata["textFeatureMethod"], "tfidf")
         self.assertEqual(metadata["recordCount"], 0)
 
+    def test_cluster_label_field_and_overrides_control_labels(self):
+        rows = processor.fallback_layout(
+            [
+                {"name": "one", "kind": "a", "owner": "Platform"},
+                {"name": "two", "kind": "a", "owner": "Platform"},
+                {"name": "three", "kind": "b", "owner": "Support"},
+            ],
+            ["kind"],
+            {
+                "labelStrategy": "labelField",
+                "labelField": "owner",
+                "labelOverrides": {"1": "Escalations", "Platform": "Platform Team"},
+            },
+        )
+
+        labels = {row["clusterId"]: row["clusterLabel"] for row in rows}
+        self.assertEqual(labels[0], "Platform Team")
+        self.assertEqual(labels[1], "Escalations")
+
 
 if __name__ == "__main__":
     unittest.main()

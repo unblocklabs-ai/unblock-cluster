@@ -11,9 +11,11 @@ import {
   INSPECTOR_WIDTH_KEY,
   boundedInspectorWidth,
   recordImageUrlForField,
+  recordMatchesQuery,
   savedInspectorWidth,
   selectionFromSearch,
   selectionSearchParams,
+  tokenStorageKey,
 } from "./uiState.js";
 import sampleManifest from "../sample-manifest.json";
 
@@ -29,6 +31,8 @@ const state = {
   layer: null,
   labelSource: null,
   labelLayer: null,
+  searchQuery: "",
+  graphId: null,
 };
 
 const palette = [
@@ -59,29 +63,38 @@ const els = {
   emptyState: document.querySelector("#emptyState"),
   viewTitle: document.querySelector("#viewTitle"),
   viewSubtitle: document.querySelector("#viewSubtitle"),
+  topbarActions: document.querySelector(".topbar-actions"),
   viewToggleButton: document.querySelector("#viewToggleButton"),
   mapModeButton: document.querySelector("#mapModeButton"),
   zoomInButton: document.querySelector("#zoomInButton"),
   zoomOutButton: document.querySelector("#zoomOutButton"),
+  recordSearch: document.querySelector("#recordSearch"),
+  clearSearchButton: document.querySelector("#clearSearchButton"),
+  forgetTokenButton: document.querySelector("#forgetTokenButton"),
 };
 
 async function loadDataset() {
   try {
     const graphId = dataGraphIdFromPath();
-    let token = tokenFromUrl() || sessionStorage.getItem("dataGraphApiToken");
+    state.graphId = graphId;
+    const storageKey = tokenStorageKey(graphId);
+    let token =
+      tokenFromUrl(graphId) ||
+      sessionStorage.getItem(storageKey) ||
+      sessionStorage.getItem("dataGraphApiToken");
     const datasetUrl = graphId
       ? `/api/data-graph/${encodeURIComponent(graphId)}/artifact/latest`
       : sampleManifest.defaultSamplePath;
     if (graphId && !token) {
-      token = promptForToken("Enter the API token to open this private cluster.");
-      if (!token) throw new Error("Missing API token.");
+      showAuthPrompt("API token required", "Open this private data graph.");
+      return;
     }
     let response = await fetchDataset(datasetUrl, token);
     if (graphId && response.status === 401) {
+      sessionStorage.removeItem(storageKey);
       sessionStorage.removeItem("dataGraphApiToken");
-      token = promptForToken("That token was rejected. Paste the API token again.");
-      if (!token) throw new Error("Invalid or missing API token.");
-      response = await fetchDataset(datasetUrl, token);
+      showAuthPrompt("Token rejected", "Paste the API token again.");
+      return;
     }
     if (!response.ok)
       throw new Error(`Could not load dataset: ${response.status}`);
@@ -98,22 +111,45 @@ function fetchDataset(datasetUrl, token) {
   });
 }
 
-function promptForToken(message) {
-  const token = window.prompt(message);
-  const trimmed = token?.trim();
-  if (!trimmed) return null;
-  sessionStorage.setItem("dataGraphApiToken", trimmed);
-  return trimmed;
-}
-
-function tokenFromUrl() {
+function tokenFromUrl(graphId) {
   const url = new URL(window.location.href);
   const token = url.searchParams.get("token");
   if (!token) return null;
-  sessionStorage.setItem("dataGraphApiToken", token);
+  sessionStorage.setItem(tokenStorageKey(graphId), token);
   url.searchParams.delete("token");
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   return token;
+}
+
+function showAuthPrompt(title, message) {
+  els.viewTitle.textContent = title;
+  if (els.viewSubtitle) els.viewSubtitle.textContent = message;
+  if (els.topbarActions) els.topbarActions.hidden = true;
+  els.mapShell.classList.add("hidden");
+  els.listShell.classList.add("hidden");
+  els.stats.innerHTML = "";
+  els.legend.innerHTML = "";
+  els.emptyState.classList.remove("hidden");
+  els.details.classList.add("hidden");
+  els.emptyState.innerHTML = `
+    <form class="auth-panel" id="authPanel">
+      <label>
+        <span>API token</span>
+        <input id="authTokenInput" type="password" autocomplete="off" required>
+      </label>
+      <button class="primary" type="submit">Open</button>
+    </form>
+  `;
+  const form = document.querySelector("#authPanel");
+  const input = document.querySelector("#authTokenInput");
+  input?.focus();
+  form?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const token = input?.value.trim();
+    if (!token) return;
+    sessionStorage.setItem(tokenStorageKey(state.graphId), token);
+    loadDataset();
+  });
 }
 
 function dataGraphIdFromPath() {
@@ -137,9 +173,14 @@ function loadRecords(payload) {
   }));
   state.fields = collectFields(state.records);
   state.clusters = buildClusters(state.records);
+  state.searchQuery = searchQueryFromUrl();
   state.selected = selectionFromUrl();
 
+  if (els.topbarActions) els.topbarActions.hidden = false;
+  els.mapShell.classList.toggle("hidden", state.mode !== "map");
+  els.listShell.classList.toggle("hidden", state.mode !== "list");
   renderChrome();
+  renderSearchControls();
   renderLegend();
   renderList();
   renderDetails();
@@ -149,6 +190,9 @@ function loadRecords(payload) {
 function showLoadError(error) {
   els.viewTitle.textContent = "Dataset could not load";
   if (els.viewSubtitle) els.viewSubtitle.textContent = error.message;
+  if (els.topbarActions) els.topbarActions.hidden = true;
+  els.mapShell.classList.add("hidden");
+  els.listShell.classList.add("hidden");
   els.stats.innerHTML = "";
   els.legend.innerHTML = "";
   els.emptyState.classList.remove("hidden");
@@ -200,15 +244,33 @@ function buildClusters(records) {
 }
 
 function renderChrome() {
+  const visibleCount = visibleRecords().length;
   els.viewTitle.textContent = state.dataset.name || "Data Atlas";
   els.stats.innerHTML = `
     <div class="stat"><strong>${state.records.length}</strong><span>Records</span></div>
+    ${
+      state.searchQuery
+        ? `<div class="stat"><strong>${visibleCount}</strong><span>Found</span></div>`
+        : ""
+    }
     <div class="stat"><strong>${state.clusters.length}</strong><span>Clusters</span></div>
   `;
+  if (els.forgetTokenButton) {
+    els.forgetTokenButton.hidden = !state.graphId;
+  }
+}
+
+function renderSearchControls() {
+  if (els.recordSearch) {
+    els.recordSearch.value = state.searchQuery;
+  }
+  if (els.clearSearchButton) {
+    els.clearSearchButton.hidden = !state.searchQuery;
+  }
 }
 
 function renderLegend() {
-  els.legend.innerHTML = state.clusters
+  els.legend.innerHTML = visibleClusters()
     .map(
       (cluster) => `
         <button class="legend-item" type="button" data-cluster="${escapeHtml(cluster.id)}" aria-pressed="${state.selected?.type === "cluster" && state.selected.value.id === cluster.id ? "true" : "false"}">
@@ -222,7 +284,19 @@ function renderLegend() {
 }
 
 function renderList() {
-  els.listContent.innerHTML = state.clusters
+  const clusters = visibleClusters();
+  if (!clusters.length) {
+    els.listContent.innerHTML = `
+      <section class="cluster-block">
+        <div class="cluster-title">
+          <h2>No records found</h2>
+          <span class="cluster-subtitle">${escapeHtml(state.searchQuery)}</span>
+        </div>
+      </section>
+    `;
+    return;
+  }
+  els.listContent.innerHTML = clusters
     .map(
       (cluster) => `
         <section class="cluster-block">
@@ -272,14 +346,17 @@ function renderDetails() {
 
   if (state.selected.type === "cluster") {
     const cluster = state.selected.value;
+    const items = cluster.items.filter((record) =>
+      recordMatchesQuery(record, state.dataset, state.searchQuery),
+    );
     els.details.innerHTML = `
       <div>
         <p class="detail-meta">${escapeHtml(groupingLabel())}</p>
         <h2>${escapeHtml(cluster.name)}</h2>
-        <p class="record-detail">${cluster.items.length} grouped records.</p>
+        <p class="record-detail">${items.length} ${state.searchQuery ? "matching" : "grouped"} records.</p>
       </div>
       <div class="field-table">
-        ${cluster.items
+        ${items
           .slice(0, 12)
           .map((record) => renderRecordCard(record))
           .join("")}
@@ -314,6 +391,8 @@ function renderDetails() {
 }
 
 function renderMap() {
+  state.map?.setTarget(null);
+
   const features = state.records.map((record) => {
     const feature = new Feature({
       geometry: new Point([record.x, record.y]),
@@ -381,8 +460,30 @@ function renderMap() {
   }
 }
 
+function visibleRecords() {
+  return state.records.filter((record) =>
+    recordMatchesQuery(record, state.dataset, state.searchQuery),
+  );
+}
+
+function visibleClusters() {
+  return state.clusters
+    .map((cluster) => ({
+      ...cluster,
+      items: cluster.items.filter((record) =>
+        recordMatchesQuery(record, state.dataset, state.searchQuery),
+      ),
+    }))
+    .filter((cluster) => cluster.items.length);
+}
+
+function firstVisibleRecord() {
+  return visibleRecords()[0] || null;
+}
+
 function styleFeature(feature) {
   const record = feature.get("record");
+  if (!recordMatchesQuery(record, state.dataset, state.searchQuery)) return undefined;
   const cluster = feature.get("cluster");
   const selected =
     state.selected?.type === "record" &&
@@ -410,6 +511,13 @@ function styleFeature(feature) {
 
 function styleGroupLabel(feature) {
   const cluster = feature.get("cluster");
+  if (
+    !cluster.items.some((record) =>
+      recordMatchesQuery(record, state.dataset, state.searchQuery),
+    )
+  ) {
+    return undefined;
+  }
   const selected =
     state.selected?.type === "cluster" &&
     state.selected.value.id === cluster.id;
@@ -433,7 +541,10 @@ function styleGroupLabel(feature) {
 }
 
 function fitMap(cluster) {
-  const records = cluster?.items || state.records;
+  const records = (cluster?.items || state.records).filter((record) =>
+    recordMatchesQuery(record, state.dataset, state.searchQuery),
+  );
+  if (!records.length) return;
   const extent = boundingExtent(records.map((record) => [record.x, record.y]));
   state.map.getView().fit(extent, {
     padding: [80, 80, 80, 80],
@@ -517,6 +628,7 @@ function normalizeConfiguredDataset(payload) {
     groupingFields,
     titleField,
     detailField,
+    recordIdField: config.recordIdField || payload.recordIdField,
     imageField: config.imageField || payload.imageField,
     records: ensureLayout(records, groupingFields),
   };
@@ -648,6 +760,7 @@ function selectionFromUrl() {
     window.location.search,
     state.records,
     state.clusters,
+    state.dataset,
   );
 }
 
@@ -683,13 +796,61 @@ function focusSelection(animate = true) {
 
 function syncSelectionToUrl() {
   const url = new URL(window.location.href);
-  url.search = selectionSearchParams(url.search, state.selected).toString();
+  url.search = selectionSearchParams(
+    url.search,
+    state.selected,
+    state.dataset,
+  ).toString();
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function restoreSelectionFromUrl() {
+  state.searchQuery = searchQueryFromUrl();
+  renderSearchControls();
   state.selected = selectionFromUrl();
+  renderChrome();
+  renderList();
   renderSelection();
+}
+
+function searchQueryFromUrl() {
+  return new URLSearchParams(window.location.search).get("q") || "";
+}
+
+function setSearchQuery(query, { updateUrl = true } = {}) {
+  state.searchQuery = String(query || "").trim();
+  if (updateUrl) syncSearchToUrl();
+  if (
+    state.selected?.type === "record" &&
+    !recordMatchesQuery(state.selected.value, state.dataset, state.searchQuery)
+  ) {
+    state.selected = null;
+    syncSelectionToUrl();
+  }
+  renderChrome();
+  renderSearchControls();
+  renderLegend();
+  renderList();
+  renderDetails();
+  state.layer?.changed();
+  state.labelLayer?.changed();
+}
+
+function syncSearchToUrl() {
+  const url = new URL(window.location.href);
+  if (state.searchQuery) {
+    url.searchParams.set("q", state.searchQuery);
+  } else {
+    url.searchParams.delete("q");
+  }
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function selectFirstSearchMatch() {
+  const record = firstVisibleRecord();
+  if (record) {
+    setSelection({ type: "record", value: record }, { focus: state.mode === "map" });
+  }
 }
 
 function initInspectorResize() {
@@ -767,6 +928,27 @@ els.zoomInButton.addEventListener("click", () => {
 els.zoomOutButton.addEventListener("click", () => {
   const view = state.map.getView();
   view.animate({ zoom: view.getZoom() - 1, duration: 180 });
+});
+
+els.recordSearch?.addEventListener("input", (event) => {
+  setSearchQuery(event.target.value);
+});
+
+els.recordSearch?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  selectFirstSearchMatch();
+});
+
+els.clearSearchButton?.addEventListener("click", () => {
+  setSearchQuery("");
+  els.recordSearch?.focus();
+});
+
+els.forgetTokenButton?.addEventListener("click", () => {
+  sessionStorage.removeItem(tokenStorageKey(state.graphId));
+  sessionStorage.removeItem("dataGraphApiToken");
+  loadDataset();
 });
 
 els.legend.addEventListener("click", (event) => {
