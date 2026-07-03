@@ -4,15 +4,19 @@ import OlMap from "ol/Map";
 import View from "ol/View";
 import Point from "ol/geom/Point";
 import VectorLayer from "ol/layer/Vector";
+import Projection from "ol/proj/Projection";
+import { addProjection } from "ol/proj";
 import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, Stroke, Style } from "ol/style";
 import { boundingExtent } from "ol/extent";
 import {
+  backToTopic,
   buildViewState,
   clearTopicSelection,
   clusterColor,
   parseViewParams,
   representativeRecords,
+  selectRecord,
   selectTopic,
   spikeBadge,
   topicLabel,
@@ -53,7 +57,16 @@ const runtime = {
   resizeBound: false,
   resizeFrame: null,
   initialFitDone: false,
+  recordDetails: new Map(),
+  recordDetailRequests: new Set(),
 };
+
+const LAYOUT_PROJECTION = new Projection({
+  code: "DATAGRAPH:LAYOUT",
+  extent: [-1_000_000, -1_000_000, 1_000_000, 1_000_000],
+  units: "pixels",
+});
+addProjection(LAYOUT_PROJECTION);
 
 if (typeof window !== "undefined") {
   window.addEventListener("DOMContentLoaded", () => {
@@ -92,6 +105,8 @@ async function loadArtifact(graphId, viewId, options = {}) {
   }
   runtime.state = buildViewState(await response.json(), options);
   runtime.initialFitDone = false;
+  runtime.recordDetails.clear();
+  runtime.recordDetailRequests.clear();
   render();
 }
 
@@ -138,8 +153,10 @@ function bindEvents() {
     render();
   });
   els.topicFilter?.addEventListener("change", () => {
-    runtime.state = updateFilters(runtime.state, { topicId: els.topicFilter.value });
-    runtime.state.selectedTopicId = runtime.state.filters.topicId || null;
+    runtime.state =
+      els.topicFilter.value === ""
+        ? clearTopicSelection(updateFilters(runtime.state, { topicId: "" }))
+        : selectTopic(runtime.state, els.topicFilter.value);
     render();
   });
   els.startFilter?.addEventListener("change", () => {
@@ -185,7 +202,7 @@ function render() {
   `;
   syncControls(state);
   renderTopics(state, records);
-  renderDetails(state, records);
+  renderInspector(state, records);
   renderList(state, records);
   renderMap(state, records);
 }
@@ -210,6 +227,13 @@ function syncControls(state) {
     .join("")}`;
   els.topicFilter.value =
     state.filters.topicId === "" ? "" : String(state.filters.topicId);
+  els.mapModeButton.setAttribute("aria-pressed", String(runtime.mode === "map"));
+  els.listModeButton.setAttribute("aria-pressed", String(runtime.mode === "list"));
+  els.fitButton.hidden = runtime.mode !== "map";
+  els.fitButton.disabled = runtime.mode !== "map";
+  const hasSelection = state.selectedTopicId !== null || state.selectedRecordId !== null;
+  els.clearTopicButton.hidden = !hasSelection;
+  els.clearTopicButton.disabled = !hasSelection;
 }
 
 function renderTopics(state, records) {
@@ -241,7 +265,11 @@ function renderTopics(state, records) {
   });
 }
 
-function renderDetails(state, records) {
+function renderInspector(state, records) {
+  if (state.selectedRecordId) {
+    renderRecordInspector(state);
+    return;
+  }
   const selectedTopic = state.topicById.get(state.selectedTopicId);
   if (!selectedTopic) {
     els.emptyState.hidden = false;
@@ -253,8 +281,9 @@ function renderDetails(state, records) {
   els.details.hidden = false;
   els.details.innerHTML = `
     <h2>${escapeHtml(topicLabel(selectedTopic))}</h2>
-    ${selectedTopic.summary ? `<p>${escapeHtml(selectedTopic.summary)}</p>` : ""}
+    ${selectedTopic.summary ? `<p class="wrap-text">${escapeHtml(selectedTopic.summary)}</p>` : ""}
     <dl>
+      <dt>Coherence</dt><dd>${selectedTopic.coherent === false ? "Low" : "Normal"}</dd>
       <dt>Visible records</dt><dd>${records.filter((record) => record.clusterId === selectedTopic.clusterId).length}</dd>
       <dt>Total records</dt><dd>${selectedTopic.size}</dd>
       <dt>Source mix</dt><dd>${formatSourceMix(selectedTopic.sourceMix)}</dd>
@@ -268,6 +297,7 @@ function renderDetails(state, records) {
             <article>
               <strong>${escapeHtml(record.title || record.recordId)}</strong>
               <p>${escapeHtml(record.customerText || "")}</p>
+              <button type="button" data-record-id="${escapeAttr(record.id)}">Inspect record</button>
               ${recordUrl ? `<a href="${escapeAttr(recordUrl)}" rel="noreferrer" target="_blank">Open source</a>` : ""}
             </article>
           `;
@@ -275,6 +305,67 @@ function renderDetails(state, records) {
         .join("")}
     </div>
   `;
+  els.details.querySelectorAll("[data-record-id]").forEach((button) => {
+    button.addEventListener("click", () => selectRecordAndRender(button.dataset.recordId));
+  });
+}
+
+function renderRecordInspector(state) {
+  const artifactRecord = state.recordById.get(state.selectedRecordId);
+  if (!artifactRecord) {
+    els.emptyState.hidden = false;
+    els.details.hidden = true;
+    return;
+  }
+  ensureRecordDetail(artifactRecord.id);
+  const detailState = runtime.recordDetails.get(artifactRecord.id);
+  const fullRecord = detailState?.record || artifactRecord;
+  const topic = state.topicById.get(artifactRecord.clusterId);
+  const loading = !detailState || detailState.status === "loading";
+  const failed = detailState?.status === "error";
+  const recordUrl = safeRecordUrl(fullRecord.recordUrl);
+  els.emptyState.hidden = true;
+  els.details.hidden = false;
+  els.details.innerHTML = `
+    <div class="inspector-heading">
+      <button type="button" data-back-to-topic>Back to topic</button>
+      <span class="topic-pill" style="--topic-color:${clusterColor(artifactRecord.clusterId)}">${escapeHtml(topicLabel(topic))}</span>
+    </div>
+    <h2>${escapeHtml(fullRecord.title || fullRecord.recordId || fullRecord.id)}</h2>
+    ${loading ? `<p class="muted">Loading full record. Showing artifact preview for now.</p>` : ""}
+    ${failed ? `<p class="error-inline">${escapeHtml(detailState.error)}</p>` : ""}
+    <dl class="record-facts">
+      <dt>Record ID</dt><dd>${escapeHtml(fullRecord.recordId || artifactRecord.recordId || artifactRecord.id)}</dd>
+      <dt>Source</dt><dd>${escapeHtml(joinParts([fullRecord.sourceType, fullRecord.sourceName]))}</dd>
+      <dt>Product</dt><dd>${escapeHtml(fullRecord.product || "")}</dd>
+      <dt>SKU</dt><dd>${escapeHtml(fullRecord.sku || "")}</dd>
+      <dt>Rating</dt><dd>${escapeHtml(formatOptionalNumber(fullRecord.rating))}</dd>
+      <dt>Sentiment</dt><dd>${escapeHtml(fullRecord.sentiment || "")}</dd>
+      <dt>Tags</dt><dd>${escapeHtml(formatTags(fullRecord.tags))}</dd>
+      <dt>Timestamp</dt><dd>${escapeHtml(fullRecord.timestamp || "")}</dd>
+      <dt>Probability</dt><dd>${formatNumber(artifactRecord.clusterProbability)}</dd>
+      <dt>Outlier score</dt><dd>${formatNumber(artifactRecord.outlierScore)}</dd>
+      ${
+        recordUrl
+          ? `<dt>URL</dt><dd><a href="${escapeAttr(recordUrl)}" rel="noreferrer" target="_blank">${escapeHtml(recordUrl)}</a></dd>`
+          : ""
+      }
+    </dl>
+    <section class="record-section">
+      <h3>Customer Text</h3>
+      <p>${escapeHtml(fullRecord.customerText || "")}</p>
+    </section>
+    <section class="record-section">
+      <h3>Metadata</h3>
+      ${formatMetadata(fullRecord.metadata)}
+    </section>
+  `;
+  els.details
+    .querySelector("[data-back-to-topic]")
+    ?.addEventListener("click", () => {
+      runtime.state = backToTopic(runtime.state);
+      render();
+    });
 }
 
 function renderList(state, records) {
@@ -286,12 +377,12 @@ function renderList(state, records) {
           .map((record) => {
             const topic = state.topicById.get(record.clusterId);
             return `
-              <tr data-topic-id="${record.clusterId}">
+              <tr class="${record.id === state.selectedRecordId ? "selected" : ""}" data-record-id="${escapeAttr(record.id)}" tabindex="0">
                 <td>${escapeHtml(topicLabel(topic))}</td>
                 <td>${escapeHtml(record.title || record.recordId)}</td>
                 <td>${escapeHtml(record.sourceType || "")}</td>
                 <td>${escapeHtml(record.sentiment || "")}</td>
-                <td>${escapeHtml(record.customerText || "")}</td>
+                <td class="text-cell"><span>${escapeHtml(record.customerText || "")}</span></td>
               </tr>
             `;
           })
@@ -299,6 +390,15 @@ function renderList(state, records) {
       </tbody>
     </table>
   `;
+  els.listContent.querySelectorAll("[data-record-id]").forEach((row) => {
+    row.addEventListener("click", () => selectRecordAndRender(row.dataset.recordId));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectRecordAndRender(row.dataset.recordId);
+      }
+    });
+  });
 }
 
 function renderMap(state, records) {
@@ -308,7 +408,7 @@ function renderMap(state, records) {
     runtime.map = new OlMap({
       target: els.mapCanvas,
       layers: [runtime.layer],
-      view: new View({ center: [0, 0], zoom: 2 }),
+      view: new View({ center: [0, 0], resolution: 1, projection: LAYOUT_PROJECTION }),
     });
   }
   runtime.source.clear();
@@ -317,17 +417,14 @@ function renderMap(state, records) {
       geometry: new Point([record.x, record.y]),
       record,
     });
-    feature.setStyle(pointStyle(record, state.selectedTopicId));
-    feature.on("change", () => {});
+    feature.setStyle(pointStyle(record, state.selectedTopicId, state.selectedRecordId));
     runtime.source.addFeature(feature);
   }
   if (!runtime.mapClickBound) {
     runtime.map.on("singleclick", (event) => {
-      const feature = runtime.map.forEachFeatureAtPixel(event.pixel, (item) => item);
-      const record = feature?.get("record");
+      const record = nearestRecordAtCoordinate(event.coordinate);
       if (record) {
-        runtime.state = selectTopic(runtime.state, record.clusterId);
-        render();
+        selectRecordAndRender(record.id);
       }
     });
     runtime.mapClickBound = true;
@@ -375,21 +472,27 @@ function hasMeasuredMapSize() {
   return Array.isArray(size) && size[0] > 0 && size[1] > 0;
 }
 
-function pointStyle(record, selectedTopicId) {
+function pointStyle(record, selectedTopicId, selectedRecordId) {
   const lowProbability = record.clusterProbability < 0.55;
-  const selected = selectedTopicId === "" || selectedTopicId === null || record.clusterId === selectedTopicId;
-  const radius = record.isNoise ? 4 : Math.max(5, Math.min(12, 5 + record.outlierScore * 5));
+  const topicSelected =
+    selectedTopicId === "" || selectedTopicId === null || record.clusterId === selectedTopicId;
+  const recordSelected = record.id === selectedRecordId;
+  const radius = recordSelected
+    ? 13
+    : record.isNoise
+      ? 4
+      : Math.max(5, Math.min(12, 5 + record.outlierScore * 5));
   return new Style({
     image: new CircleStyle({
       radius,
       fill: new Fill({
         color: record.isNoise
           ? "rgba(120, 120, 120, 0.35)"
-          : `${clusterColor(record.clusterId)}${lowProbability || !selected ? "88" : "dd"}`,
+          : `${clusterColor(record.clusterId)}${lowProbability || !topicSelected ? "88" : "dd"}`,
       }),
       stroke: new Stroke({
-        color: record.isNoise ? "#4b5563" : selected ? "#111827" : "#ffffff",
-        width: record.isNoise ? 2 : 1,
+        color: recordSelected ? "#f8fafc" : record.isNoise ? "#4b5563" : topicSelected ? "#111827" : "#ffffff",
+        width: recordSelected ? 4 : record.isNoise ? 2 : 1,
       }),
     }),
   });
@@ -410,11 +513,74 @@ function fitVisible() {
   return true;
 }
 
+function nearestRecordAtCoordinate(coordinate) {
+  if (!runtime.map || !runtime.source) return null;
+  const resolution = runtime.map.getView().getResolution() || 1;
+  const tolerance = resolution * 10;
+  const toleranceSquared = tolerance * tolerance;
+  let nearest = null;
+  let nearestDistance = Infinity;
+  for (const feature of runtime.source.getFeatures()) {
+    const record = feature.get("record");
+    if (!record) continue;
+    const dx = record.x - coordinate[0];
+    const dy = record.y - coordinate[1];
+    const distance = dx * dx + dy * dy;
+    if (distance <= toleranceSquared && distance < nearestDistance) {
+      nearest = record;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
 function hideWorkspace() {
   els.mapShell.hidden = true;
   els.listShell.hidden = true;
   els.topicPanel.innerHTML = "";
   els.stats.innerHTML = "";
+}
+
+function selectRecordAndRender(recordId) {
+  runtime.state = selectRecord(runtime.state, recordId);
+  render();
+}
+
+async function ensureRecordDetail(recordId) {
+  if (
+    runtime.recordDetails.has(recordId) ||
+    runtime.recordDetailRequests.has(recordId) ||
+    !runtime.state
+  ) {
+    return;
+  }
+  runtime.recordDetailRequests.add(recordId);
+  runtime.recordDetails.set(recordId, { status: "loading", record: null, error: null });
+  try {
+    const graphId = runtime.state.artifact.graphId;
+    const response = await fetch(
+      `/api/graphs/${encodeURIComponent(graphId)}/records/${encodeURIComponent(recordId)}`,
+    );
+    if (!response.ok) {
+      throw new Error(`Record request failed with ${response.status}`);
+    }
+    runtime.recordDetails.set(recordId, {
+      status: "loaded",
+      record: await response.json(),
+      error: null,
+    });
+  } catch (error) {
+    runtime.recordDetails.set(recordId, {
+      status: "error",
+      record: null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    runtime.recordDetailRequests.delete(recordId);
+    if (runtime.state?.selectedRecordId === recordId) {
+      render();
+    }
+  }
 }
 
 function renderError(title, message) {
@@ -433,6 +599,42 @@ function formatSourceMix(sourceMix = {}) {
 
 function formatNumber(value) {
   return Number.isFinite(value) ? value.toFixed(2) : "n/a";
+}
+
+function formatOptionalNumber(value) {
+  return Number.isFinite(value) ? String(value) : "";
+}
+
+function formatTags(value) {
+  return Array.isArray(value) ? value.join(", ") : "";
+}
+
+function formatMetadata(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return `<p class="muted">No metadata.</p>`;
+  }
+  const entries = Object.entries(value);
+  if (!entries.length) return `<p class="muted">No metadata.</p>`;
+  return `
+    <dl class="metadata-list">
+      ${entries
+        .map(
+          ([key, item]) =>
+            `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(formatMetadataValue(item))}</dd>`,
+        )
+        .join("")}
+    </dl>
+  `;
+}
+
+function formatMetadataValue(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function joinParts(parts) {
+  return parts.filter(Boolean).join(" · ");
 }
 
 function escapeHtml(value) {
