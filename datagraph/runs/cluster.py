@@ -21,6 +21,7 @@ def execute_cluster_job(
     view_id: str,
     embedding_run_id: str,
     cluster_config: dict[str, Any],
+    set_default: bool = True,
 ) -> dict[str, Any]:
     started = time.monotonic()
     phase_started = _start_phase(db_path, run_id, "loading")
@@ -78,18 +79,19 @@ def execute_cluster_job(
     )
     noise_count = sum(1 for label in labels if int(label) == -1)
     cluster_count = len({int(label) for label in labels if int(label) != -1})
-    with connect(db_path) as conn:
-        conn.execute(
-            """
-            UPDATE views
-               SET default_embedding_run_id = ?,
-                   default_cluster_run_id = ?,
-                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-             WHERE id = ? AND graph_id = ?
-            """,
-            (embedding_run_id, run_id, view_id, graph_id),
-        )
-        conn.commit()
+    if set_default:
+        with connect(db_path) as conn:
+            conn.execute(
+                """
+                UPDATE views
+                   SET default_embedding_run_id = ?,
+                       default_cluster_run_id = ?,
+                       updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                 WHERE id = ? AND graph_id = ?
+                """,
+                (embedding_run_id, run_id, view_id, graph_id),
+            )
+            conn.commit()
     _finish_phase(phase_durations, "persisting", phase_started)
     stats = {
         "records": len(scoped_ids),
@@ -103,7 +105,11 @@ def execute_cluster_job(
             "minClusterSize": effective_min_cluster_size,
             "minSamples": effective_min_samples,
         },
-        "params": {"embeddingRunId": embedding_run_id, "cluster": cluster_config},
+        "params": {
+            "embeddingRunId": embedding_run_id,
+            "cluster": cluster_config,
+            "setDefault": set_default,
+        },
         "phaseDurations": phase_durations,
         "durationSeconds": round(time.monotonic() - started, 6),
     }

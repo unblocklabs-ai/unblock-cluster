@@ -255,6 +255,7 @@ def test_full_synthetic_embedding_run_reuse_and_one_record_mutation(tmp_path: Pa
         assert final["progress"]["reused"] == 0
         assert final["stats"]["records"] == 5000
         assert final["stats"]["uniqueTexts"] == len(unique_hashes)
+        assert final["stats"]["providerRetries"] == 0
         assert provider.max_in_flight <= 2
 
         counts = _db_counts(client, run_id)
@@ -276,6 +277,7 @@ def test_full_synthetic_embedding_run_reuse_and_one_record_mutation(tmp_path: Pa
         assert rerun["progress"]["embedded"] == 0
         assert rerun["progress"]["reused"] == 5000
         assert rerun["stats"]["providerRequests"] == 0
+        assert rerun["stats"]["providerRetries"] == 0
         assert provider.calls == calls_after_first
 
         mutated = dict(records[0])
@@ -326,6 +328,7 @@ def test_retry_success_and_permanent_failure(tmp_path: Path) -> None:
         run = _poll_run(client, graph["id"], run_id)
         assert run["status"] == "succeeded"
         assert success_provider.attempts == 3
+        assert run["stats"]["providerRetries"] == 2
         assert clock.sleeps == [0, 0]
 
     failing_provider = FlakyProvider(failures_before_success=None)
@@ -336,7 +339,7 @@ def test_retry_success_and_permanent_failure(tmp_path: Path) -> None:
         run_id = _enqueue_embedding(client, graph["id"])
         run = _poll_run(client, graph["id"], run_id)
         assert run["status"] == "failed"
-        assert "embedding provider failed after" in run["error_text"]
+        assert "embedding provider failed after" in run["errorText"]
         assert failing_provider.attempts == 4
 
 

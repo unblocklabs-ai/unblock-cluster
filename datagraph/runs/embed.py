@@ -56,6 +56,7 @@ async def execute_embedding_run(
                 "uniqueTexts": 0,
                 "reused": 0,
                 "providerRequests": 0,
+                "providerRetries": 0,
                 "model": model,
                 "dimensions": dimensions,
             },
@@ -88,6 +89,7 @@ async def execute_embedding_run(
                 "uniqueTexts": len(text_by_hash),
                 "reused": reused,
                 "providerRequests": 0,
+                "providerRetries": 0,
                 "model": model,
                 "dimensions": dimensions,
             },
@@ -109,6 +111,7 @@ async def execute_embedding_run(
     batch_hashes = _batch_hashes(missing_hashes, batches)
     embedded_items = 0
     provider_requests = 0
+    provider_retries = 0
     progress_lock = asyncio.Lock()
     batch_queue: asyncio.Queue[tuple[list[str], list[str]] | None] = asyncio.Queue()
     for hashes, batch in zip(batch_hashes, batches, strict=True):
@@ -118,7 +121,7 @@ async def execute_embedding_run(
         batch_queue.put_nowait(None)
 
     async def worker() -> None:
-        nonlocal embedded_items, provider_requests
+        nonlocal embedded_items, provider_requests, provider_retries
         while True:
             item = await batch_queue.get()
             if item is None:
@@ -130,8 +133,9 @@ async def execute_embedding_run(
                 await limiter.acquire()
                 if cancel_event.is_set():
                     raise EmbeddingRunCancelled
-                vectors = await embed_with_retry(provider, texts, sleep=sleep)
+                vectors, attempts = await embed_with_retry(provider, texts, sleep=sleep)
                 provider_requests += 1
+                provider_retries += attempts - 1
             _store_vectors(db_path, model, dimensions, hashes, vectors)
             _update_item_statuses(db_path, run_id, hashes, "embedded")
             async with progress_lock:
@@ -157,6 +161,7 @@ async def execute_embedding_run(
                 "uniqueTexts": len(text_by_hash),
                 "reused": reused,
                 "providerRequests": provider_requests,
+                "providerRetries": provider_retries,
                 "model": model,
                 "dimensions": dimensions,
             },
@@ -175,6 +180,7 @@ async def execute_embedding_run(
             "uniqueTexts": len(text_by_hash),
             "reused": reused,
             "providerRequests": provider_requests,
+            "providerRetries": provider_retries,
             "model": model,
             "dimensions": dimensions,
         },

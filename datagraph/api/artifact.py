@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from datagraph.api.warnings import resolved_run_warnings
 from datagraph.db import connect, fetch_all, fetch_one
 
 router = APIRouter(prefix="/api/graphs/{graph_id}/views/{view_id}", tags=["artifact"])
@@ -47,6 +48,12 @@ async def get_view_artifact(request: Request, graph_id: str, view_id: str) -> di
         labels = _latest_labels_by_cluster(conn, cluster_run_id)
         label_run_id = _matching_default_label_run_id(conn, graph_id, view_id, cluster_run_id)
         trend_snapshots, trend_run_id = _trend_snapshots(conn, graph_id, view_id, cluster_run_id)
+        warnings = resolved_run_warnings(
+            conn,
+            graph_id=graph_id,
+            view_id=view_id,
+            cluster_run_id=cluster_run_id,
+        )
         topics = _topics(conn, cluster_run_id, labels, trend_snapshots)
         data = _data_rows(conn, cluster_run_id, layout_run_id)
 
@@ -73,6 +80,7 @@ async def get_view_artifact(request: Request, graph_id: str, view_id: str) -> di
             }
         },
         "runRefs": run_refs,
+        "warnings": warnings,
         "layout": {
             "method": layout_params.get("method", "umap"),
             "params": layout_params,

@@ -199,7 +199,7 @@ def test_label_failure_policies_and_invalid_schema_retry(tmp_path: Path) -> None
         )
         failed_run = _poll_run(client, graph_id, failed_run_id)
         assert failed_run["status"] == "failed"
-        assert "all target clusters failed labeling" in failed_run["error_text"]
+        assert "all target clusters failed labeling" in failed_run["errorText"]
 
         label_provider.always_fail = False
         before_invalid_calls = len(label_provider.calls)

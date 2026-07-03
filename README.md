@@ -59,6 +59,35 @@ Agents upload already-normalized, redacted records, run the pipeline, and then
 share the `vizUrl` or call evidence recipes. The backend does not extract from
 source systems and does not redact sensitive data.
 
+### Pre-Upload Filtering
+
+Filter source exports before upload. Do not send records that are only
+company-authored or outbound messages, including OOO replies and
+autoresponders. Exclude transactional sends and automated campaign records such
+as newsletters, tracking-pixel bodies, and URL-dominant bodies. Exclude
+vendor/PR outreach, records with zero customer-authored messages (use inbound
+message counts when the source provides them), and records with no meaningful
+free text such as score-only NPS rows.
+
+After upload, leftover junk is visible through service-side signals: junk-like
+topic labels, `coherent: false` labels, and records surfaced by
+`GET /api/graphs/:gid/views/:vid/outliers`. Treat those as feedback for the
+next extract, not as a reason to tune clustering around bad input.
+
+### Iterating On Quality
+
+The cheap quality loop is: upload, cluster, label, review topics/coherence/
+outliers, tighten source filters, delete the graph or re-upload, and repeat.
+Embeddings are content-addressed by rendered text, so reruns are cheap: only
+changed texts are re-embedded; unchanged records reuse stored vectors.
+
+For parameter tuning, view-scoped run POSTs accept `setDefault` (boolean,
+default `true`) on `cluster`, `layout`, `label`, and `trends`. Use
+`{"setDefault": false}` to run experiments that persist outputs without
+repointing the view defaults. Promote a winner by rerunning it with
+`{"setDefault": true}` (or omitting the key). Clustering reruns reuse the
+existing embedding run, so promotion is cheap.
+
 Minimum pipeline:
 
 1. `POST /api/graphs` with `embedding.textFields`. Minimal payload:
@@ -86,8 +115,11 @@ Minimum pipeline:
 8. Open `/?graphId=...&viewId=...` or fetch evidence.
 
 Every POST above returns a run. Poll `GET /api/graphs/:gid/runs/:runId` until
-`status` is `succeeded` (or `failed` with `error_text`) before the next step;
-`progress` reports live counts. `POST /api/graphs/:gid/runs/:runId/cancel`
+`status` is `succeeded` (or `failed` with `errorText`) before the next step;
+`progress` reports live counts. Run responses use camelCase keys:
+`id`, `graphId`, `viewId`, `type`, `status`, `params`, `progress`,
+`errorText`, `inputRefs`, `stats`, `createdAt`, `startedAt`, and
+`completedAt`. `POST /api/graphs/:gid/runs/:runId/cancel`
 cancels queued runs always and embed/label runs between batches; a running
 CPU job (cluster/layout) is not interruptible.
 
@@ -116,6 +148,11 @@ Scope keys: `sourceTypes`, `sourceNames`, `products`, `skus`, `sentiments`,
 Embeddings are shared across views; each view runs its own cluster / layout /
 label / trend runs on demand. Views are post-ingest slices, not a substitute
 for pre-upload filtering.
+
+Successful view-scoped runs promote themselves to the view's defaults unless
+`setDefault` is explicitly `false`. A non-promoting run still persists its
+memberships, labels, trend rows, or layout points; it simply leaves
+`default*RunId` fields unchanged.
 
 Inspection reads (all resolve the view's default runs, overridable by id):
 
@@ -165,6 +202,7 @@ Shape:
     "labelRunId": "run_...",
     "trendRunId": "run_..."
   },
+  "warnings": [],
   "layout": {"method": "umap", "params": {}},
   "noise": {"noiseCount": 12, "noiseRatio": 0.02},
   "topics": [],
@@ -176,6 +214,12 @@ Topic entries include label, summary, coherence, size, probability, source mix,
 representative record ids, and an optional trend snapshot. Record entries
 include truncated `customerText`, source fields, timestamp, x/y coordinates,
 cluster probability, outlier score, and noise status.
+
+`warnings` is always present on artifact and topics responses. It is empty for
+a healthy view. It names the label endpoint when the resolved cluster run has
+no labels, and it calls out label/trend default mismatches when a view points
+at a cluster run different from the one that produced the default labels or
+trend snapshots.
 
 ## UI Modes
 

@@ -131,12 +131,12 @@ async def embed_with_retry(
     *,
     sleep: SleepFunc = asyncio.sleep,
     max_attempts: int = MAX_RETRY_ATTEMPTS,
-) -> list[np.ndarray]:
+) -> tuple[list[np.ndarray], int]:
     attempt = 0
     while True:
         attempt += 1
         try:
-            return await provider.embed_batch(texts)
+            return await provider.embed_batch(texts), attempt
         except Exception as exc:  # noqa: BLE001 - provider boundary normalizes retryable failures.
             retry_after = _retry_after(exc)
             if attempt >= max_attempts or not _is_retryable(exc):
