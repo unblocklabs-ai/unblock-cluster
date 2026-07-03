@@ -94,7 +94,7 @@ def test_noop_run_moves_queued_running_succeeded_through_polling_api(tmp_path: P
         assert running["progress"]["state"] == "running"
 
         succeeded = _poll_status(client, graph_id, run_id, "succeeded")
-        assert succeeded["completed_at"] is not None
+        assert succeeded["completedAt"] is not None
 
         listed = client.get(
             f"/api/graphs/{graph_id}/runs",
@@ -139,7 +139,7 @@ def test_startup_recovery_marks_running_run_failed(tmp_path: Path) -> None:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "failed"
-        assert body["error_text"] == "interrupted by restart"
+        assert body["errorText"] == "interrupted by restart"
 
 
 def test_mock_embedding_provider_is_deterministic_and_unit_norm() -> None:

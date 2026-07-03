@@ -22,6 +22,7 @@ def execute_trend_run(
     time_config: dict[str, Any],
     window: dict[str, str] | None,
     update_progress: ProgressCallback,
+    set_default: bool = True,
 ) -> dict[str, Any]:
     update_progress(run_id, {"state": "running", "phase": "loading"})
     _load_cluster_run(db_path, graph_id, view_id, cluster_run_id)
@@ -65,14 +66,15 @@ def execute_trend_run(
             """,
             (run_id, json.dumps(summary, sort_keys=True)),
         )
-        conn.execute(
-            """
-            UPDATE views
-               SET default_trend_run_id = ?, updated_at = ?
-             WHERE id = ? AND graph_id = ?
-            """,
-            (run_id, now_iso(), view_id, graph_id),
-        )
+        if set_default:
+            conn.execute(
+                """
+                UPDATE views
+                   SET default_trend_run_id = ?, updated_at = ?
+                 WHERE id = ? AND graph_id = ?
+                """,
+                (run_id, now_iso(), view_id, graph_id),
+            )
         conn.commit()
 
     return {

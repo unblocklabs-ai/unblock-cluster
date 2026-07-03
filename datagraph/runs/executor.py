@@ -295,6 +295,7 @@ class RunExecutor:
                 row["view_id"],
                 params["embeddingRunId"],
                 params["cluster"],
+                params.get("setDefault", True),
             )
         elif row["type"] == "layout":
             stats = await loop.run_in_executor(
@@ -306,6 +307,7 @@ class RunExecutor:
                 row["view_id"],
                 params["embeddingRunId"],
                 params["layout"],
+                params.get("setDefault", True),
             )
         else:
             stats = await loop.run_in_executor(self._process_pool, _cpu_noop, params)
@@ -348,6 +350,7 @@ class RunExecutor:
             cluster_run_id=params["clusterRunId"],
             cluster_ids=params.get("clusterIds"),
             labeling_config=params["labeling"],
+            set_default=params.get("setDefault", True),
             cancel_event=cancel_event,
             update_progress=self._update_progress,
             update_stats=self._update_stats,
@@ -365,6 +368,7 @@ class RunExecutor:
             cluster_run_id=params["clusterRunId"],
             time_config=params["time"],
             window=params.get("window"),
+            set_default=params.get("setDefault", True),
             update_progress=self._update_progress,
         )
         self._update_stats(row["id"], stats)

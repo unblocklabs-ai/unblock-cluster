@@ -51,6 +51,7 @@ async def execute_label_run(
     provider_factory: LabelProviderFactory | None,
     openai_api_key: str | None,
     sleep: SleepFunc,
+    set_default: bool = True,
 ) -> None:
     _load_cluster_run(db_path, graph_id, view_id, cluster_run_id)
     effective_prompt = effective_label_prompt(labeling_config)
@@ -150,7 +151,7 @@ async def execute_label_run(
         raise RuntimeError(
             f"all target clusters failed labeling; failedClusterIds={sorted(failed_cluster_ids)}"
         )
-    if not cancel_event.is_set():
+    if set_default and not cancel_event.is_set():
         _set_default_label_run(db_path, graph_id, view_id, run_id)
 
 

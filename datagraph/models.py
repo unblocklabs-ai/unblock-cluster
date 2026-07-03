@@ -9,18 +9,18 @@ class RunResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    graph_id: str
-    view_id: str | None
+    graphId: str
+    viewId: str | None
     type: str
     status: str
     params: dict[str, Any]
     progress: dict[str, Any]
-    error_text: str | None
-    input_refs: dict[str, Any]
+    errorText: str | None
+    inputRefs: dict[str, Any]
     stats: dict[str, Any]
-    created_at: str
-    started_at: str | None
-    completed_at: str | None
+    createdAt: str
+    startedAt: str | None
+    completedAt: str | None
 
 
 class HealthResponse(BaseModel):
@@ -29,4 +29,3 @@ class HealthResponse(BaseModel):
 
 class MockEmbeddingRequest(BaseModel):
     texts: list[str]
-

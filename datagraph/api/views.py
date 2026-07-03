@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from datagraph.api.records import list_records_for_graph
 from datagraph.api.runs import _to_response
+from datagraph.api.warnings import resolved_run_warnings
 from datagraph.core.config import (
     ConfigValidationError,
     apply_cluster_overrides,
@@ -133,9 +134,11 @@ async def create_cluster_run(
     graph_id: str,
     view_id: str,
     body: dict[str, Any] | None = None,
+    set_default_param: bool | None = Query(default=None, alias="setDefault"),
 ) -> dict[str, Any]:
     body = body or {}
-    _reject_unknown_body(body, {"embeddingRunId", "cluster"})
+    _reject_unknown_body(body, {"embeddingRunId", "cluster", "setDefault"})
+    set_default = _set_default_from_request(body, set_default_param)
     graph = _get_graph_row(request.app.state.settings.db_path, graph_id)
     _get_view_row(request.app.state.settings.db_path, graph_id, view_id)
     embedding_run_id = body.get("embeddingRunId") or _latest_succeeded_embedding_run(
@@ -162,7 +165,11 @@ async def create_cluster_run(
         graph_id,
         run_type="cluster",
         view_id=view_id,
-        params={"embeddingRunId": embedding_run_id, "cluster": merged["cluster"]},
+        params={
+            "embeddingRunId": embedding_run_id,
+            "cluster": merged["cluster"],
+            "setDefault": set_default,
+        },
         input_refs={"embeddingRunId": embedding_run_id, "viewId": view_id},
     )
     row = request.app.state.run_executor.get_run(graph_id, run_id)
@@ -175,9 +182,11 @@ async def create_layout_run(
     graph_id: str,
     view_id: str,
     body: dict[str, Any] | None = None,
+    set_default_param: bool | None = Query(default=None, alias="setDefault"),
 ) -> dict[str, Any]:
     body = body or {}
-    _reject_unknown_body(body, {"embeddingRunId", "layout"})
+    _reject_unknown_body(body, {"embeddingRunId", "layout", "setDefault"})
+    set_default = _set_default_from_request(body, set_default_param)
     graph = _get_graph_row(request.app.state.settings.db_path, graph_id)
     _get_view_row(request.app.state.settings.db_path, graph_id, view_id)
     embedding_run_id = body.get("embeddingRunId") or _latest_succeeded_embedding_run(
@@ -204,6 +213,7 @@ async def create_layout_run(
         params={
             "embeddingRunId": embedding_run_id,
             "layout": {**merged["layout"], "seed": merged["cluster"]["seed"]},
+            "setDefault": set_default,
         },
         input_refs={"embeddingRunId": embedding_run_id, "viewId": view_id},
     )
@@ -217,9 +227,11 @@ async def create_label_run(
     graph_id: str,
     view_id: str,
     body: dict[str, Any] | None = None,
+    set_default_param: bool | None = Query(default=None, alias="setDefault"),
 ) -> dict[str, Any]:
     body = body or {}
-    _reject_unknown_body(body, {"clusterRunId", "clusterIds", "labeling"})
+    _reject_unknown_body(body, {"clusterRunId", "clusterIds", "labeling", "setDefault"})
+    set_default = _set_default_from_request(body, set_default_param)
     graph = _get_graph_row(request.app.state.settings.db_path, graph_id)
     cluster_run = _resolve_cluster_run(
         request.app.state.settings.db_path,
@@ -244,6 +256,7 @@ async def create_label_run(
             "clusterRunId": cluster_run["id"],
             "clusterIds": cluster_ids,
             "labeling": merged["labeling"],
+            "setDefault": set_default,
         },
         input_refs={"clusterRunId": cluster_run["id"], "viewId": view_id},
     )
@@ -257,9 +270,11 @@ async def create_trend_run(
     graph_id: str,
     view_id: str,
     body: dict[str, Any] | None = None,
+    set_default_param: bool | None = Query(default=None, alias="setDefault"),
 ) -> dict[str, Any]:
     body = body or {}
-    _reject_unknown_body(body, {"clusterRunId", "window", "time"})
+    _reject_unknown_body(body, {"clusterRunId", "window", "time", "setDefault"})
+    set_default = _set_default_from_request(body, set_default_param)
     graph = _get_graph_row(request.app.state.settings.db_path, graph_id)
     cluster_run = _resolve_cluster_run(
         request.app.state.settings.db_path,
@@ -284,6 +299,7 @@ async def create_trend_run(
             "clusterRunId": cluster_run["id"],
             "time": merged["time"],
             "window": window,
+            "setDefault": set_default,
         },
         input_refs={"clusterRunId": cluster_run["id"], "viewId": view_id},
     )
@@ -385,6 +401,12 @@ async def list_topics(
         )
         labels = _latest_labels_by_cluster(conn, run_id)
         trends = _trend_snapshots_by_cluster(conn, graph_id, view_id, run_id)
+        warnings = resolved_run_warnings(
+            conn,
+            graph_id=graph_id,
+            view_id=view_id,
+            cluster_run_id=run_id,
+        )
     refs = json.loads(run["input_refs_json"])
     stats = json.loads(run["stats_json"])
     return {
@@ -394,6 +416,7 @@ async def list_topics(
             "noiseCount": stats.get("noiseCount", 0),
             "noiseRatio": stats.get("noiseRatio", 0),
         },
+        "warnings": warnings,
         "topics": [
             _topic_response(row, labels.get(row["cluster_id"]), trends.get(row["cluster_id"]))
             for row in rows
@@ -424,12 +447,19 @@ async def get_topic(
         )
         labels = _latest_labels_by_cluster(conn, run_id)
         trends = _trend_snapshots_by_cluster(conn, graph_id, view_id, run_id)
+        warnings = resolved_run_warnings(
+            conn,
+            graph_id=graph_id,
+            view_id=view_id,
+            cluster_run_id=run_id,
+        )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="topic not found")
     refs = json.loads(run["input_refs_json"])
     return {
         "clusterRunId": run_id,
         "embeddingRunId": refs.get("embeddingRunId"),
+        "warnings": warnings,
         "topic": _topic_response(row, labels.get(cluster_id), trends.get(cluster_id)),
     }
 
@@ -925,6 +955,23 @@ def _validate_cluster_ids(value: Any) -> list[int] | None:
             detail=[{"field": "clusterIds", "message": "must be a non-empty list of integers"}],
         )
     return sorted(set(value))
+
+
+def _validate_set_default(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=[{"field": "setDefault", "message": "must be a boolean"}],
+        )
+    return value
+
+
+def _set_default_from_request(body: dict[str, Any], query_value: bool | None) -> bool:
+    if "setDefault" in body:
+        return _validate_set_default(body["setDefault"])
+    if query_value is not None:
+        return query_value
+    return True
 
 
 def _validate_name(value: Any) -> str:

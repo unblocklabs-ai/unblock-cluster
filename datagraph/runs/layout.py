@@ -18,6 +18,7 @@ def execute_layout_job(
     view_id: str,
     embedding_run_id: str,
     layout_config: dict[str, Any],
+    set_default: bool = True,
 ) -> dict[str, Any]:
     started = time.monotonic()
     phase_started = _start_phase(db_path, run_id, "loading")
@@ -69,16 +70,17 @@ def execute_layout_job(
                 for record_id, (x, y) in zip(record_ids, points, strict=True)
             ],
         )
-        conn.execute(
-            """
-            UPDATE views
-               SET default_embedding_run_id = COALESCE(default_embedding_run_id, ?),
-                   default_layout_run_id = ?,
-                   updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-             WHERE id = ? AND graph_id = ?
-            """,
-            (embedding_run_id, run_id, view_id, graph_id),
-        )
+        if set_default:
+            conn.execute(
+                """
+                UPDATE views
+                   SET default_embedding_run_id = COALESCE(default_embedding_run_id, ?),
+                       default_layout_run_id = ?,
+                       updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                 WHERE id = ? AND graph_id = ?
+                """,
+                (embedding_run_id, run_id, view_id, graph_id),
+            )
         conn.commit()
     _finish_phase(phase_durations, "persisting", phase_started)
     return {
