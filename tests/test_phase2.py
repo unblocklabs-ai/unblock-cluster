@@ -380,7 +380,13 @@ def test_real_openai_embedding_integration_opt_in(tmp_path: Path) -> None:
         _post_records(
             client,
             graph["id"],
-            [_minimal_record(f"real-{index}") for index in range(10)],
+            [
+                _minimal_record(
+                    f"real-{index}",
+                    customerText=f"Please help with issue number {index} about my order.",
+                )
+                for index in range(10)
+            ],
         )
         run_id = _enqueue_embedding(client, graph["id"])
         run = _poll_run(client, graph["id"], run_id)
