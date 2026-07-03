@@ -544,18 +544,33 @@ Three test tiers:
    `surprising_topics`. Gate before calling the pipeline "working": ARI ≥ 0.5
    on the 5k set and the planted spike ranked #1.
 
-### Deferred real-key acceptance ledger
+### Real-key acceptance ledger — COMPLETED 2026-07-03
 
-Accepted mock-only so far; run all of these in one sitting once
-`OPENAI_API_KEY` is exported (total cost: well under $1):
+All checks run with a real `OPENAI_API_KEY`; results:
 
-- Phase 2: real 5k embed via `POST /embeddings`; observe throttle bounding
-  request rate; immediate re-run reports 100% reuse.
-- Phase 3: `quality_eval.py` ARI ≥ 0.5 gate on real embeddings.
-- Phase 4: label quality (recognizable labels on synthetic topics) and a junk
-  cluster yielding `coherent: false`.
-- Phase 5: planted December spike ranks #1 in `surprising_topics` on real
-  embeddings.
+- Phase 2 — **passed**. Real 5k embed succeeded (batched, progress observed);
+  a re-embed reported 100% reuse with ZERO provider requests. Throttle note:
+  at this scale (~10 requests/run) the 500-RPM default is never approached,
+  so rate-bounding is verified by the fake-clock unit tests, not live load.
+- Phase 3 — **passed**. `quality_eval.py` on real embeddings: ARI 0.719
+  (gate ≥ 0.5), NMI 0.864, noise 3.0%. Observation: HDBSCAN produced 80
+  clusters against 20 planted topics — pure-but-split subclusters (high NMI).
+  The default `minClusterSize` (0.2% → 10 at 5k) over-splits; real datasets
+  will likely want larger values. Tuning input for the 100k pass.
+- Phase 4 — **passed** on label quality: real `gpt-5.4-mini` labels are
+  human-recognizable and map cleanly to planted topics ("Heat-Damaged
+  Shipping Products", "Energy wear-off by afternoon", "Adverse Reactions:
+  Headache/Nausea", "Denied return/refund follow-ups"); 80/80 and 17/17
+  labeled with zero failures across two runs. Caveat: no genuine junk
+  cluster occurred in these runs, so `coherent: false` from the real model
+  remains exercised only by the offline plumbing tests.
+- Phase 5 — **passed**. On real embeddings, the planted December spike ranks
+  #1 in `surprising_topics` with spike score 69.0 (25x the runner-up),
+  topBucket 2025-12-01.
+
+Both opt-in real-API pytest tests pass. (The Phase 2 one had a latent
+fixture bug — 10 identical texts correctly dedupe to 1 content-addressed
+vector — fixed to use distinct texts; first real execution caught it.)
 
 Performance acceptance: full 100k pipeline (embed cached → cluster → layout →
 label → trends) completes in under ~30 minutes on an M-series laptop, API

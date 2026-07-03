@@ -85,7 +85,7 @@ export function visibleRecords(state) {
   return records.filter((record) => recordMatchesFilters(record, state.filters));
 }
 
-export function recordMatchesFilters(record, filters) {
+function recordMatchesFilters(record, filters) {
   if (filters.topicId !== "" && record.clusterId !== Number(filters.topicId)) {
     return false;
   }
@@ -121,14 +121,6 @@ export function representativeRecords(topic, records) {
   return (topic?.representativeRecordIds || [])
     .map((id) => byId.get(id))
     .filter(Boolean);
-}
-
-export function topicStats(topic, records) {
-  const memberCount = records.filter((record) => record.clusterId === topic.clusterId).length;
-  return {
-    memberCount,
-    visibleShare: records.length ? memberCount / records.length : 0,
-  };
 }
 
 export function clusterColor(clusterId) {
