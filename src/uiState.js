@@ -17,6 +17,7 @@ export function buildViewState(artifact, options = {}) {
     (a, b) => b.size - a.size || a.clusterId - b.clusterId,
   );
   const topicById = new Map(topics.map((topic) => [topic.clusterId, topic]));
+  const recordById = new Map((artifact?.data || []).map((record) => [record.id, record]));
   const sourceTypes = [
     ...new Set((artifact?.data || []).map((record) => record.sourceType).filter(Boolean)),
   ].sort((a, b) => a.localeCompare(b));
@@ -33,6 +34,7 @@ export function buildViewState(artifact, options = {}) {
     artifact,
     topics,
     topicById,
+    recordById,
     sourceTypes,
     timeExtent,
     filters: {
@@ -42,7 +44,8 @@ export function buildViewState(artifact, options = {}) {
       start: options.start || "",
       end: options.end || "",
     },
-    selectedTopicId: normalizeTopicId(options.selectedTopicId),
+    selectedTopicId: normalizeNullableTopicId(options.selectedTopicId),
+    selectedRecordId: normalizeRecordId(options.selectedRecordId),
   };
 }
 
@@ -59,13 +62,36 @@ export function updateFilters(state, patch) {
 }
 
 export function selectTopic(state, topicId) {
+  const normalizedTopicId = normalizeTopicId(topicId);
   return {
     ...state,
-    selectedTopicId: normalizeTopicId(topicId),
+    selectedTopicId: normalizedTopicId === "" ? null : normalizedTopicId,
+    selectedRecordId: null,
     filters: {
       ...state.filters,
-      topicId: normalizeTopicId(topicId),
+      topicId: normalizedTopicId,
     },
+  };
+}
+
+export function selectRecord(state, recordId) {
+  const normalizedRecordId = normalizeRecordId(recordId);
+  const record = normalizedRecordId ? state.recordById.get(normalizedRecordId) : null;
+  if (!record) return state;
+  return {
+    ...state,
+    selectedTopicId: record.clusterId,
+    selectedRecordId: normalizedRecordId,
+  };
+}
+
+export function backToTopic(state) {
+  if (state.selectedTopicId === null || state.selectedTopicId === undefined) {
+    return state;
+  }
+  return {
+    ...state,
+    selectedRecordId: null,
   };
 }
 
@@ -73,6 +99,7 @@ export function clearTopicSelection(state) {
   return {
     ...state,
     selectedTopicId: null,
+    selectedRecordId: null,
     filters: {
       ...state.filters,
       topicId: "",
@@ -155,4 +182,14 @@ function normalizeTopicId(value) {
   if (value === null || value === undefined || value === "") return "";
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : "";
+}
+
+function normalizeNullableTopicId(value) {
+  const normalized = normalizeTopicId(value);
+  return normalized === "" ? null : normalized;
+}
+
+function normalizeRecordId(value) {
+  if (value === null || value === undefined || value === "") return null;
+  return String(value);
 }

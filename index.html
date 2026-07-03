@@ -43,10 +43,16 @@
 
         <section class="stage">
           <div class="modebar">
-            <button id="mapModeButton" type="button">Map</button>
-            <button id="listModeButton" type="button">List</button>
-            <button id="fitAllButton" type="button">Fit</button>
-            <button id="clearTopicButton" type="button">Clear Topic</button>
+            <div class="segmented-control" role="group" aria-label="View mode">
+              <button id="mapModeButton" type="button" aria-pressed="true">Map</button>
+              <button id="listModeButton" type="button" aria-pressed="false">List</button>
+            </div>
+            <div class="map-actions" role="group" aria-label="Map actions">
+              <button id="fitAllButton" type="button">Fit</button>
+            </div>
+            <div class="selection-actions" role="group" aria-label="Selection actions">
+              <button id="clearTopicButton" type="button" hidden>Clear Topic</button>
+            </div>
           </div>
           <section class="map-shell" id="mapShell" aria-label="Topic map">
             <div id="mapCanvas"></div>

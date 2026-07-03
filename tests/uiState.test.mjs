@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  backToTopic,
   buildViewState,
   clearTopicSelection,
   parseViewParams,
   representativeRecords,
+  selectRecord,
   selectTopic,
   spikeBadge,
   updateFilters,
@@ -101,6 +103,8 @@ test("builds sorted artifact view state with time extent and source filters", ()
   );
   assert.deepEqual(state.sourceTypes, ["review", "support"]);
   assert.deepEqual(state.timeExtent, { min: "2025-06-01", max: "2025-12-20" });
+  assert.equal(state.topicById.get(1).label, "December spike");
+  assert.equal(state.recordById.get("r1").recordId, "rec-1");
 });
 
 test("filters records by time, topic, source, and search query", () => {
@@ -121,11 +125,51 @@ test("filters records by time, topic, source, and search query", () => {
 test("selects and clears topic state", () => {
   let state = selectTopic(buildViewState(artifact), 1);
   assert.equal(state.selectedTopicId, 1);
+  assert.equal(state.selectedRecordId, null);
   assert.equal(state.filters.topicId, 1);
 
   state = clearTopicSelection(state);
   assert.equal(state.selectedTopicId, null);
+  assert.equal(state.selectedRecordId, null);
   assert.equal(state.filters.topicId, "");
+});
+
+test("transitions from topic to record and back to topic", () => {
+  let state = selectTopic(buildViewState(artifact), 1);
+  state = selectRecord(state, "r2");
+
+  assert.equal(state.selectedTopicId, 1);
+  assert.equal(state.selectedRecordId, "r2");
+  assert.equal(state.filters.topicId, 1);
+  assert.deepEqual(
+    visibleRecords(state).map((record) => record.id),
+    ["r1", "r2"],
+  );
+
+  state = backToTopic(state);
+  assert.equal(state.selectedTopicId, 1);
+  assert.equal(state.selectedRecordId, null);
+  assert.equal(state.filters.topicId, 1);
+});
+
+test("record selection from list, map, and representative card converges selection state", () => {
+  const base = buildViewState(artifact);
+  const fromList = selectRecord(base, "r3");
+  const fromMap = selectRecord(base, "r3");
+  const fromCard = selectRecord(selectTopic(base, 2), "r3");
+
+  const publicSelection = (state) => ({
+    selectedTopicId: state.selectedTopicId,
+    selectedRecordId: state.selectedRecordId,
+  });
+  assert.deepEqual(publicSelection(fromList), {
+    selectedTopicId: 2,
+    selectedRecordId: "r3",
+  });
+  assert.deepEqual(publicSelection(fromMap), publicSelection(fromList));
+  assert.deepEqual(publicSelection(fromCard), publicSelection(fromList));
+  assert.equal(fromList.filters.topicId, "");
+  assert.equal(fromCard.filters.topicId, 2);
 });
 
 test("resolves representatives and trend spike badge", () => {
