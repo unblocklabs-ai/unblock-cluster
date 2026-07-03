@@ -72,6 +72,10 @@ def execute_cluster_job(
     )
     _persist_summaries(db_path, run_id, summaries)
 
+    effective_min_cluster_size, effective_min_samples = effective_hdbscan_params(
+        cluster_config,
+        population,
+    )
     noise_count = sum(1 for label in labels if int(label) == -1)
     cluster_count = len({int(label) for label in labels if int(label) != -1})
     with connect(db_path) as conn:
@@ -95,6 +99,10 @@ def execute_cluster_job(
         "noiseCount": noise_count,
         "noiseRatio": noise_count / population if population else 0,
         "embeddingRunId": embedding_run_id,
+        "effectiveHdbscan": {
+            "minClusterSize": effective_min_cluster_size,
+            "minSamples": effective_min_samples,
+        },
         "params": {"embeddingRunId": embedding_run_id, "cluster": cluster_config},
         "phaseDurations": phase_durations,
         "durationSeconds": round(time.monotonic() - started, 6),
@@ -188,16 +196,32 @@ def _clustering_space(matrix: np.ndarray, config: dict[str, Any]) -> np.ndarray:
     return reducer.fit_transform(matrix).astype(np.float32, copy=False)
 
 
+def effective_hdbscan_params(config: dict[str, Any], population: int) -> tuple[int, int]:
+    """Resolve null minClusterSize/minSamples to population-scaled defaults.
+
+    Defaults retuned on the real-embedding quality eval (2026-07-03): the old
+    0.2% floor-10 default, with minSamples following minClusterSize,
+    over-split 20 planted topics into 80 pure fragments at 5k. 0.5% (floored
+    at 15, capped at 150 so 100k-scale datasets keep emerging-topic
+    detection) plus a decoupled, smaller minSamples smooths the density
+    estimate without erasing small topics.
+    """
+    min_cluster_size = config["hdbscan"]["minClusterSize"]
+    min_samples = config["hdbscan"]["minSamples"]
+    effective_size = int(min_cluster_size or min(150, max(15, round(0.005 * population))))
+    effective_samples = min(10, effective_size) if min_samples is None else int(min_samples)
+    return effective_size, effective_samples
+
+
 def _hdbscan_labels(
     clustering_space: np.ndarray,
     config: dict[str, Any],
     population: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    min_cluster_size = config["hdbscan"]["minClusterSize"]
-    min_samples = config["hdbscan"]["minSamples"]
+    min_cluster_size, min_samples = effective_hdbscan_params(config, population)
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=int(min_cluster_size or max(10, round(0.002 * population))),
-        min_samples=None if min_samples is None else int(min_samples),
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
         metric="euclidean",
         cluster_selection_method=config["hdbscan"]["clusterSelectionMethod"],
         cluster_selection_epsilon=float(config["hdbscan"]["clusterSelectionEpsilon"]),

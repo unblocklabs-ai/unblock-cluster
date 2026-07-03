@@ -20,7 +20,7 @@ from datagraph.core.openai_client import MockEmbeddingProvider
 from datagraph.core.vectors import normalize_l2
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.runs.cluster import select_representatives
+from datagraph.runs.cluster import effective_hdbscan_params, select_representatives
 from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
 
@@ -440,3 +440,16 @@ def _assert_membership_integrity(
             assert set(reps) <= high_probability_ids
         source_mix = json.loads(summary["source_mix_json"])
         assert source_mix == dict(Counter(row["source_type"] for row in members))
+
+
+def test_effective_hdbscan_params_defaults_and_overrides() -> None:
+    def config(min_cluster_size=None, min_samples=None):
+        return {"hdbscan": {"minClusterSize": min_cluster_size, "minSamples": min_samples}}
+
+    assert effective_hdbscan_params(config(), 1000) == (15, 10)
+    assert effective_hdbscan_params(config(), 5000) == (25, 10)
+    assert effective_hdbscan_params(config(), 20000) == (100, 10)
+    assert effective_hdbscan_params(config(), 100000) == (150, 10)
+    assert effective_hdbscan_params(config(min_cluster_size=40), 5000) == (40, 10)
+    assert effective_hdbscan_params(config(min_samples=25), 5000) == (25, 25)
+    assert effective_hdbscan_params(config(min_cluster_size=8), 100000) == (8, 8)
