@@ -313,7 +313,13 @@ Stored on the graph, overridable per run request. Full default shape:
   directly on normalized embeddings — only sensible for small/clean sets;
   rejected above 20k records). Anything else is a 422. No field is accepted
   and ignored.
-- `minClusterSize` default when null: `max(10, round(0.002 * n_records))`.
+- `minClusterSize` default when null: `min(150, max(15, round(0.005 * n)))`,
+  and `minSamples` default when null: `min(10, minClusterSize)` — retuned
+  2026-07-03 after the real-embedding eval showed the original 0.2%/floor-10
+  default (with minSamples tracking minClusterSize) over-splitting 20 planted
+  topics into 80 pure fragments at 5k. The 150 cap preserves emerging-topic
+  detection at 100k scale. Effective values are echoed in cluster-run stats
+  as `effectiveHdbscan`.
 - `seed` fixed by default for reproducibility (this forces single-threaded
   UMAP; set `"seed": null` to trade reproducibility for parallel speed).
 
@@ -684,6 +690,14 @@ in a usable state.
 ---
 
 ## Amendments
+
+**2026-07-03 (b)** (post-ledger). Retuned HDBSCAN defaults per the ledger's
+over-splitting finding — minClusterSize 0.5%/floor-15/cap-150, minSamples
+decoupled at min(10, minClusterSize) — and added `effectiveHdbscan` to
+cluster-run stats. Alternatives considered (clusterSelectionEpsilon, larger
+UMAP n_neighbors, minClusterSize sweep on the cached reduction, post-hoc
+centroid merging) deferred pending real OpenClaw data; the sweep is the first
+candidate for the 100k pass.
 
 **2026-07-03** (after Phases 0–4 closed; Phase 5 in flight). Folded
 implementation-settled decisions back into this document so it stays
