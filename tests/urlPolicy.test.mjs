@@ -28,7 +28,7 @@ test("blocks untrusted external image hosts", () => {
 
 test("blocks same-origin API and non-image paths", () => {
   assert.equal(
-    trustedImageUrl("/api/data-graph/dg_abc/artifact/latest", baseUrl),
+    trustedImageUrl("/api/graphs/grf_abc/views/view_abc/artifact", baseUrl),
     null,
   );
   assert.equal(trustedImageUrl("/clusters/dg_abc", baseUrl), null);

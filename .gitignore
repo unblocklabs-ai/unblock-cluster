@@ -3,6 +3,9 @@ dist/
 .venv
 raw-data
 local-data/
+data/
 .env
 __pycache__/
 sample-data/
+output/
+.playwright-cli/

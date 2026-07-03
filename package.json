@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4173",
     "build": "vite build",
-    "serve": ".venv/bin/python server.py",
-    "check": "node --check src/app.js && node --check src/urlPolicy.js && node --check src/uiState.js && node --test tests/*.test.mjs && .venv/bin/python -m py_compile server.py processor.py tests/*.py scripts/*.py && .venv/bin/python -m unittest discover -s tests -p 'test_*.py'"
+    "serve": ".venv/bin/python -m datagraph.main",
+    "check": "node --check src/app.js && node --check src/urlPolicy.js && node --check src/uiState.js && node --test tests/*.test.mjs && .venv/bin/python -m compileall -q datagraph scripts tests && .venv/bin/pytest"
   },
   "dependencies": {
     "ol": "^10.9.0",

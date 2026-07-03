@@ -1,175 +1,71 @@
 <!doctype html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Data Atlas</title>
-        <link rel="stylesheet" href="./src/styles.css" />
-    </head>
-    <body>
-        <div id="app">
-            <main class="workspace">
-                <header class="topbar">
-                    <div>
-                        <h1 id="viewTitle">Restaurant clusters by cuisine</h1>
-                        <p id="viewSubtitle"></p>
-                    </div>
-                    <div class="topbar-actions">
-                        <label class="search-control">
-                            <span>Search</span>
-                            <input
-                                id="recordSearch"
-                                type="search"
-                                autocomplete="off"
-                                placeholder="Record ID, title, detail"
-                            />
-                        </label>
-                        <button
-                            id="clearSearchButton"
-                            type="button"
-                            title="Clear search"
-                            hidden
-                        >
-                            Clear
-                        </button>
-                        <button
-                            id="forgetTokenButton"
-                            type="button"
-                            title="Forget saved token"
-                            hidden
-                        >
-                            Token
-                        </button>
-                    </div>
-                    <div class="filterbar" id="filterbar" aria-label="Record filters">
-                        <label>
-                            <span>Issue type</span>
-                            <select id="issueTypeFilter">
-                                <option value="">All issues</option>
-                            </select>
-                        </label>
-                        <label>
-                            <span>Refund</span>
-                            <select id="refundFilter">
-                                <option value="">Any refund</option>
-                                <option value="true">Refund</option>
-                                <option value="false">No refund</option>
-                            </select>
-                        </label>
-                        <label>
-                            <span>Cancellation</span>
-                            <select id="cancellationFilter">
-                                <option value="">Any cancellation</option>
-                                <option value="true">Cancellation</option>
-                                <option value="false">No cancellation</option>
-                            </select>
-                        </label>
-                        <label>
-                            <span>Color</span>
-                            <select id="colorModeSelect">
-                                <option value="cluster">Cluster</option>
-                                <option value="issueType">Issue type</option>
-                                <option value="outcome">Outcome</option>
-                                <option value="messageCount">Messages</option>
-                            </select>
-                        </label>
-                        <label class="checkbox-filter">
-                            <input id="selectedClusterOnly" type="checkbox" />
-                            <span>Selected cluster</span>
-                        </label>
-                    </div>
-                    <div class="stats" id="stats"></div>
-                </header>
-
-                <section
-                    class="map-shell"
-                    id="mapShell"
-                    aria-label="Cluster map"
-                >
-                    <div id="mapCanvas"></div>
-                    <button
-                        id="viewToggleButton"
-                        type="button"
-                        class="view-toggle"
-                    >
-                        List
-                    </button>
-                    <div class="map-controls" aria-label="Map controls">
-                        <button
-                            id="fitAllButton"
-                            type="button"
-                            class="map-control map-control-fit"
-                            title="Fit all visible records"
-                        >
-                            Fit
-                        </button>
-                        <button
-                            id="clearSelectionButton"
-                            type="button"
-                            class="map-control map-control-clear"
-                            title="Clear selection"
-                            hidden
-                        >
-                            Clear
-                        </button>
-                        <button id="zoomInButton" type="button" title="Zoom in">
-                            +
-                        </button>
-                        <button
-                            id="zoomOutButton"
-                            type="button"
-                            title="Zoom out"
-                        >
-                            -
-                        </button>
-                    </div>
-                    <div class="legend" id="legend"></div>
-                    <div
-                        class="cluster-browser hidden"
-                        id="clusterBrowser"
-                        aria-label="All clusters"
-                    ></div>
-                    <div
-                        class="hover-preview hidden"
-                        id="hoverPreview"
-                        aria-live="polite"
-                    ></div>
-                </section>
-
-                <section
-                    class="list-shell hidden"
-                    id="listShell"
-                    aria-label="Record list"
-                >
-                    <button
-                        id="mapModeButton"
-                        type="button"
-                        class="view-toggle"
-                    >
-                        Map
-                    </button>
-                    <div id="listContent"></div>
-                </section>
-            </main>
-
-            <aside class="inspector" aria-label="Selection details">
-                <button
-                    class="inspector-resizer"
-                    id="inspectorResizer"
-                    type="button"
-                    aria-label="Resize selection details"
-                ></button>
-                <div class="empty-state" id="emptyState">
-                    <span>Select a cluster or record</span>
-                    <p>
-                        Click the map to inspect grouped records from the JSON
-                        file.
-                    </p>
-                </div>
-                <div class="details hidden" id="details"></div>
-            </aside>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Data Graph</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div>
+          <h1 id="viewTitle">Data Graph</h1>
+          <p id="viewSubtitle"></p>
         </div>
+        <div class="toolbar">
+          <label>
+            <span>Search</span>
+            <input id="recordSearch" type="search" autocomplete="off" />
+          </label>
+          <label>
+            <span>Topic</span>
+            <select id="topicFilter"></select>
+          </label>
+          <label>
+            <span>Source</span>
+            <select id="sourceTypeFilter"></select>
+          </label>
+          <label>
+            <span>Start</span>
+            <input id="startDate" type="date" />
+          </label>
+          <label>
+            <span>End</span>
+            <input id="endDate" type="date" />
+          </label>
+        </div>
+        <div class="stats" id="stats"></div>
+      </header>
 
-        <script type="module" src="./src/app.js"></script>
-    </body>
+      <main class="workspace">
+        <aside class="topic-panel" id="topicPanel" aria-label="Topics"></aside>
+
+        <section class="stage">
+          <div class="modebar">
+            <button id="mapModeButton" type="button">Map</button>
+            <button id="listModeButton" type="button">List</button>
+            <button id="fitAllButton" type="button">Fit</button>
+            <button id="clearTopicButton" type="button">Clear Topic</button>
+          </div>
+          <section class="map-shell" id="mapShell" aria-label="Topic map">
+            <div id="mapCanvas"></div>
+          </section>
+          <section class="list-shell" id="listShell" aria-label="Record list" hidden>
+            <div id="listContent"></div>
+          </section>
+          <section class="picker" id="picker" hidden></section>
+        </section>
+
+        <aside class="inspector" aria-label="Topic evidence">
+          <div class="empty-state" id="emptyState">
+            <strong>Select a topic</strong>
+            <p>Representative records, source mix, labels, and trend context appear here.</p>
+          </div>
+          <div class="details" id="details" hidden></div>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="./src/app.js"></script>
+  </body>
 </html>
