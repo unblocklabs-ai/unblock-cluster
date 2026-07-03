@@ -691,6 +691,26 @@ in a usable state.
 
 ## Amendments
 
+**2026-07-03 (c)** (after the first real-data pilot — Sakara Kustomer/NPS,
+3,509 records, full OpenAI pipeline). Findings: the retuned HDBSCAN defaults
+validated on real language (26 topics; the agent's 0.5x/2x sweep bracketed
+the default as best); embedding reuse, freshness, evidence loop, and
+`coherent: false` (6/6 correct on score-only NPS clusters) all worked; zero
+validation rejects, zero 409s, zero human interventions in the API flow. The
+two real findings: (1) ~41% of the graph was non-support junk (promo/OOO/
+tracking/score-only records) — the agent-boundary exclusion list in this doc
+predicted it exactly but was never surfaced in the README agent contract;
+(2) a design bug — every successful run promotes itself to the view default,
+so tuning cluster runs silently repointed /artifact at an unlabeled run.
+Phase 8 decisions: `setDefault` request param (default true) on all
+view-scoped run POSTs; explicit `warnings` on artifact/topics when resolved
+runs mismatch (no silent label/trend drops); run responses normalized to
+camelCase (the API's only snake_case surface — a pilot DX complaint);
+`providerRetries` in embed stats; README gains a pre-upload filtering
+checklist and the iterate-on-quality workflow. Deferred: `facetBy`
+breakdowns (any record/metadata key, generalizing sourceMix) — the next
+feature candidate, driven by the pilot's unanswerable questions.
+
 **2026-07-03 (b)** (post-ledger). Retuned HDBSCAN defaults per the ledger's
 over-splitting finding — minClusterSize 0.5%/floor-15/cap-150, minSamples
 decoupled at min(10, minClusterSize) — and added `effectiveHdbscan` to
