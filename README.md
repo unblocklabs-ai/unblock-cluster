@@ -17,10 +17,13 @@ npm run build
 DATAGRAPH_DATA_DIR=output/demo-data .venv/bin/python -m datagraph.main
 ```
 
-Open the `vizUrl` printed by `scripts/demo_seed.py`. The API binds to
-`127.0.0.1:8080` by default. Set `DATAGRAPH_PORT` or `DATA_GRAPH_PORT` to
-override the port, and `DATAGRAPH_DATA_DIR` or `DATA_GRAPH_DATA_DIR` to choose
-the SQLite data directory. This repository's current `.venv` runs Python 3.14.
+Open the `vizUrl` printed by `scripts/demo_seed.py`. Note that the seed script
+deletes and recreates its data directory (`output/demo-data` by default) on
+every run. The API binds to `127.0.0.1:8080` by default. Set `DATAGRAPH_PORT`
+or `DATA_GRAPH_PORT` to override the port, and `DATAGRAPH_DATA_DIR` or
+`DATA_GRAPH_DATA_DIR` to choose the SQLite data directory — see `.env.example`
+for the complete (three-variable) configuration surface. Developed and tested
+on Python 3.14.
 
 The demo above is fully offline. Running the real pipeline (OpenAI embeddings
 and topic labeling) requires `OPENAI_API_KEY` in the server's environment.
@@ -58,8 +61,20 @@ source systems and does not redact sensitive data.
 
 Minimum pipeline:
 
-1. `POST /api/graphs` with `embedding.textFields`. The response includes an
-   auto-created `all_records` view — its id is the `:vid` used below.
+1. `POST /api/graphs` with `embedding.textFields`. Minimal payload:
+
+   ```json
+   {
+     "name": "acme-supplements",
+     "config": {
+       "embedding": {"textFields": ["title", "customerText", "product", "tags"]}
+     }
+   }
+   ```
+
+   All other config keys have documented defaults and are filled into the
+   response. It includes an auto-created `all_records` view — its id is the
+   `:vid` used below.
 2. `POST /api/graphs/:gid/records` in batches of at most 1000.
 3. `POST /api/graphs/:gid/embeddings` (body may override any `embedding.*`
    config key, e.g. `requestsPerMinute` / `maxConcurrency` to stay inside the
@@ -234,10 +249,13 @@ last-write-wins. Unchanged text is never re-embedded.
 
 Extraction, pre-filtering, aggregation, and redaction belong to agents before
 upload — this service has no redaction pipeline. With `provider: "openai"`,
-customer text is sent to OpenAI twice: rendered record text for embeddings,
-and representative record text for topic labeling (`gpt-5.4-mini`). Redact or
-drop sensitive values before upload. The demo, tests, mock embeddings,
-evidence reads, artifact reads, and frontend build make no network calls.
+customer text leaves the machine at two points: embedding runs send every
+record's rendered text, and label runs (optional — but whenever one is
+triggered) send each topic's representative record text to `gpt-5.4-mini`.
+Skipping labeling skips that second flow; nothing else transmits customer
+text. Redact or drop sensitive values before upload. The demo, tests, mock
+embeddings, evidence reads, artifact reads, and frontend build make no
+network calls.
 
 ## Checks
 
