@@ -713,6 +713,30 @@ Ordered; top item is the next phase candidate.
 
 ## Amendments
 
+**2026-07-04 (g)** (pilot round 4 — raw vs summary A/B verdict: SUMMARY WINS
+for Sakara). The semantic junk gate removed 437 records with zero new regex
+rules (152 ooo + 185 vendor_pitch + 78 other + 10 newsletter + 9 platform);
+raw side had 191 junk records clustered, summary side had 0. Summary topics
+are materially more routeable ("Missed skip cancellation requests", "Detox
+schedule changes", "Metabolism powder restock inquiries"). No catastrophic
+homogenization — the known merge (late delivery + warm/spoiled in one topic)
+did not swallow neighboring themes. Receipts stayed raw. Adopted
+recommendation: summarize-then-embed is the Sakara DEFAULT for new pulls,
+raw concat kept as audit/control view during rollout. Caveats:
+summary.product facets need canonicalization (fix agent-side: enumerate
+product families in `summarization.context`); summary.issue is per-record
+unique and useless as an aggregate facet (expected — topics are the
+aggregate). Cost: 2,446 records = 14m13s, 2,462 provider requests; token
+usage NOT persisted → cost unauditable (Phase 15). Two Phase 14 issues →
+Phase 15: (1) BUG — pre-Phase-14 graphs 500 on /summarize because stored
+config_json lacks the summarization section; stored configs must be
+hydrated with current defaults on load (systemic forward-compat fix, every
+future config section otherwise repeats this); (2) NOT a bug but a doc gap —
+the "100% reuse" expectation: per-record failures (4 exhausted retries on
+first run) self-heal on the next run (reused 2,443 + summarized 3 misses).
+Failure isolation working as designed; README must state reuse is per-text
+and failed records retry.
+
 **2026-07-04 (f)** (Phase 13). Extraction-quality guidance from the pilots
 is now standing README agent contract (representation dominates, message-
 level filtering, facet-worthy metadata, history backfill, diagnostic table,
