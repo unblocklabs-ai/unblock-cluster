@@ -691,6 +691,37 @@ in a usable state.
 
 ## Amendments
 
+**2026-07-04 (d)** (pilot round 2 + Phase 10 + topics research). Round 2
+(filtered re-run, same Sakara data): junk share 41% → 2.7%, 12 topics /
+0.59% noise, surprising_topics 5/5 genuine, coherent:false 0 fires (as
+predicted on clean input), setDefault tuning workflow and mismatch warnings
+behaved exactly as designed, zero human interventions again. The agent
+versioned its filter rules as `sakara-kustomer-filter-recipe-v1` (10
+reason-bucketed rules). New quality frontier: a 45% mega-topic ("Order
+status and support requests", 1,145 records) that global minClusterSize
+tuning provably cannot split (8→13 clusters, 30→9; the blob persists).
+Phase 10 shipped tunnel-readiness: gzip (artifact 3.23MB → 0.42MB wire),
+artifact ETag/304 + bounded compose cache (review caught a stale-ETag bug —
+label-table freshness must be an ETag input because labels merge
+newest-wins across ALL runs, not just the default), 4dp transport floats,
+records-list `normalized` now opt-in, immutable asset caching, debounced
+search, cached OL styles, 500-row list cap.
+Topics research (UMAP/HDBSCAN/BERTopic docs): our clustering-space UMAP
+used the visualization default `min_dist=0.1` — UMAP's own clustering guide
+says 0.0 ("pack points densely… cleaner separations"); the mega-topic is
+EOM's documented signature ("one or two large clusters plus many small
+ones"); hdbscan's BranchDetector is explicitly not a re-clustering tool;
+BERTopic has no drill-down either (merge-only hierarchy). Phase 11
+decisions: expose `cluster.space.minDist` default 0.0 (quality-eval
+re-gated); `focus: {clusterRunId, clusterId}` reclustering — local UMAP
+re-spreads variance the global projection compressed; focus runs are
+inspection runs (setDefault forced false, read via ?clusterRunId=
+overrides); `facetBy` breakdowns on topics/evidence reads (generalizing
+sourceMix to any record field or metadata key — double-confirmed by both
+pilot rounds); README guidance for leaf/epsilon escape hatches. Real-data
+acceptance deferred to the OpenClaw: focus-recluster the Sakara mega-topic
+and judge whether the children are actionable.
+
 **2026-07-03 (c)** (after the first real-data pilot — Sakara Kustomer/NPS,
 3,509 records, full OpenAI pipeline). Findings: the retuned HDBSCAN defaults
 validated on real language (26 topics; the agent's 0.5x/2x sweep bracketed
