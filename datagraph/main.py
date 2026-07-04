@@ -58,6 +58,8 @@ def create_app(
             openai_api_key=resolved_settings.openai_api_key,
             clock=clock,
             sleep=sleep,
+            idle_timeout=resolved_settings.worker_idle_timeout,
+            inline_cpu=resolved_settings.inline_cpu_runs,
         )
         executor.recover_interrupted()
         await executor.start()

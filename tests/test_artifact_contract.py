@@ -4,81 +4,55 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
-from tests.test_phase3 import StructuredTopicProvider
-from tests.test_phase4 import ScriptedLabelProvider
+from tests.helpers import test_settings
+from tests.test_clustering_layout import StructuredTopicProvider
+from tests.test_labeling import ScriptedLabelProvider
 
 
-def test_view_artifact_shape_labels_trends_and_truncation(tmp_path: Path) -> None:
-    records = generate_records(5000, 42)[:500]
-    records[0] = {**records[0], "customerText": "x" * 500}
-    label_provider = ScriptedLabelProvider()
-    with _phase7_client(tmp_path, records, label_provider) as client:
-        graph = _create_graph(client)
-        graph_id = graph["id"]
-        view_id = _all_records_view_id(graph)
-        _post_records(client, graph_id, records)
-        embed_run_id = client.post(f"/api/graphs/{graph_id}/embeddings", json={}).json()["id"]
-        assert _poll_run(client, graph_id, embed_run_id, timeout=60)["status"] == "succeeded"
-        cluster_run_id = _enqueue_cluster(client, graph_id, view_id)
-        assert _poll_run(client, graph_id, cluster_run_id, timeout=120)["status"] == "succeeded"
-        layout_response = client.post(f"/api/graphs/{graph_id}/views/{view_id}/layout", json={})
-        layout_run_id = layout_response.json()["id"]
-        layout_run = _poll_run(client, graph_id, layout_run_id, timeout=120)
-        assert layout_run["status"] == "succeeded", layout_run
-        label_run_id = client.post(f"/api/graphs/{graph_id}/views/{view_id}/label", json={}).json()[
-            "id"
-        ]
-        assert _poll_run(client, graph_id, label_run_id, timeout=120)["status"] == "succeeded"
-        trend_run_id = client.post(
-            f"/api/graphs/{graph_id}/views/{view_id}/trends",
-            json={
-                "time": {"bucket": "week"},
-                "window": {
-                    "start": "2025-12-01T00:00:00Z",
-                    "end": "2025-12-31T23:59:59Z",
-                },
-            },
-        ).json()["id"]
-        assert _poll_run(client, graph_id, trend_run_id, timeout=60)["status"] == "succeeded"
+@pytest.mark.slow
+def test_view_artifact_shape_labels_trends_and_truncation(built_graph: Any) -> None:
+    client = built_graph.client
+    graph_id = built_graph.graph_id
+    view_id = built_graph.view_id
 
-        run_count_before = _run_count(client, graph_id)
-        response = client.get(f"/api/graphs/{graph_id}/views/{view_id}/artifact")
-        assert response.status_code == 200, response.text
-        assert _run_count(client, graph_id) == run_count_before
-        artifact = response.json()
-        assert artifact["graphId"] == graph_id
-        assert artifact["viewId"] == view_id
-        assert artifact["runRefs"] == {
-            "embeddingRunId": embed_run_id,
-            "clusterRunId": cluster_run_id,
-            "layoutRunId": layout_run_id,
-            "labelRunId": label_run_id,
-            "trendRunId": trend_run_id,
-        }
-        assert artifact["layout"]["method"] == "umap"
-        assert artifact["noise"]["noiseCount"] >= 0
-        assert len(artifact["data"]) == layout_run["stats"]["population"]
-        required_record_fields = {"x", "y", "clusterProbability", "outlierScore"}
-        assert all(required_record_fields <= set(row) for row in artifact["data"])
-        assert any(
-            row["customerText"].endswith("...") and len(row["customerText"]) == 300
-            for row in artifact["data"]
-        )
-        assert artifact["topics"]
-        assert any(
-            topic["label"] is not None and topic["summary"] is not None
-            for topic in artifact["topics"]
-        )
-        assert any(topic["trend"] is not None for topic in artifact["topics"])
+    run_count_before = _run_count(client, graph_id)
+    response = client.get(f"/api/graphs/{graph_id}/views/{view_id}/artifact")
+    assert response.status_code == 200, response.text
+    assert _run_count(client, graph_id) == run_count_before
+    artifact = response.json()
+    assert artifact["graphId"] == graph_id
+    assert artifact["viewId"] == view_id
+    assert artifact["runRefs"] == {
+        "embeddingRunId": built_graph.embedding_run_id,
+        "clusterRunId": built_graph.cluster_run_id,
+        "layoutRunId": built_graph.layout_run_id,
+        "labelRunId": built_graph.label_run_id,
+        "trendRunId": built_graph.trend_run_id,
+    }
+    assert artifact["layout"]["method"] == "umap"
+    assert artifact["noise"]["noiseCount"] >= 0
+    assert len(artifact["data"]) == len(built_graph.records)
+    required_record_fields = {"x", "y", "clusterProbability", "outlierScore"}
+    assert all(required_record_fields <= set(row) for row in artifact["data"])
+    assert any(
+        row["customerText"].endswith("...") and len(row["customerText"]) == 300
+        for row in artifact["data"]
+    )
+    assert artifact["topics"]
+    assert any(
+        topic["label"] is not None and topic["summary"] is not None for topic in artifact["topics"]
+    )
+    assert any(topic["trend"] is not None for topic in artifact["topics"])
 
 
+@pytest.mark.slow
 def test_view_artifact_409_matrix_and_optional_label_trend(tmp_path: Path) -> None:
     records = generate_records(5000, 42)[:160]
     with _phase7_client(tmp_path, records, ScriptedLabelProvider()) as client:
@@ -129,7 +103,7 @@ def _phase7_client(
     provider = StructuredTopicProvider(text_to_topic)
     return TestClient(
         create_app(
-            Settings(data_dir=tmp_path / "data", port=0),
+            test_settings(tmp_path / "data"),
             embedding_provider_factory=lambda _config: provider,
             label_provider_factory=lambda _config: label_provider,
         )
@@ -193,7 +167,7 @@ def _poll_run(
         last = response.json()
         if last["status"] in {"succeeded", "failed", "cancelled"}:
             return last
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise AssertionError(f"run did not finish; last={last}")
 
 
