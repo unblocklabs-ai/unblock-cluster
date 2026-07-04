@@ -20,6 +20,7 @@ from datagraph.core.config import (
     apply_labeling_overrides,
     apply_layout_overrides,
     apply_time_overrides,
+    load_graph_config,
 )
 from datagraph.core.ids import new_id, now_iso
 from datagraph.core.scope import ScopeValidationError, compile_scope, validate_scope
@@ -201,7 +202,7 @@ async def create_cluster_run(
             status_code=status.HTTP_409_CONFLICT,
             detail="view has no succeeded embedding run; POST /api/graphs/{gid}/embeddings first",
         )
-    config = json.loads(graph["config_json"])
+    config = load_graph_config(graph)
     try:
         merged = apply_cluster_overrides(config, body.get("cluster", {}))
     except ConfigValidationError as exc:
@@ -263,7 +264,7 @@ async def create_layout_run(
             status_code=status.HTTP_409_CONFLICT,
             detail="view has no succeeded embedding run; POST /api/graphs/{gid}/embeddings first",
         )
-    config = json.loads(graph["config_json"])
+    config = load_graph_config(graph)
     try:
         merged = apply_layout_overrides(config, body.get("layout", {}))
     except ConfigValidationError as exc:
@@ -305,7 +306,7 @@ async def create_label_run(
         body.get("clusterRunId"),
     )
     cluster_ids = _validate_cluster_ids(body.get("clusterIds"))
-    config = json.loads(graph["config_json"])
+    config = load_graph_config(graph)
     try:
         merged = apply_labeling_overrides(config, body.get("labeling", {}))
     except ConfigValidationError as exc:
@@ -347,7 +348,7 @@ async def create_trend_run(
         view_id,
         body.get("clusterRunId"),
     )
-    config = json.loads(graph["config_json"])
+    config = load_graph_config(graph)
     try:
         merged = apply_time_overrides(config, body.get("time", {}))
     except ConfigValidationError as exc:

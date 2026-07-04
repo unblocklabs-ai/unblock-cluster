@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 
 from datagraph.api.warnings import resolved_run_warnings
+from datagraph.core.config import load_graph_config
 from datagraph.db import connect, fetch_all, fetch_one
 
 router = APIRouter(prefix="/api/graphs/{graph_id}/views/{view_id}", tags=["artifact"])
@@ -112,7 +113,7 @@ def _compose_artifact(conn: Any, context: dict[str, Any]) -> dict[str, Any]:
 
     cluster_stats = json.loads(cluster_run["stats_json"])
     layout_params = json.loads(layout_run["params_json"]).get("layout", {})
-    graph_config = json.loads(graph["config_json"])
+    graph_config = load_graph_config(graph)
     embedding_config = graph_config.get("embedding", {})
     run_refs = {
         "embeddingRunId": cluster_refs.get("embeddingRunId") or layout_refs.get("embeddingRunId"),

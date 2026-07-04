@@ -14,7 +14,12 @@ from datagraph.core.labeling import (
     label_with_retry,
     make_label_provider,
 )
-from datagraph.core.openai_client import SleepFunc
+from datagraph.core.openai_client import (
+    SleepFunc,
+    add_token_usage,
+    token_usage_dict,
+    zero_token_usage,
+)
 from datagraph.db import connect, fetch_all, fetch_one
 
 LabelProviderFactory = Callable[[dict[str, Any]], LabelProvider]
@@ -88,10 +93,11 @@ async def execute_label_run(
     labeled = 0
     failed = 0
     failed_cluster_ids: list[int] = []
+    token_usage = zero_token_usage()
     progress_lock = asyncio.Lock()
 
     async def worker() -> None:
-        nonlocal labeled, failed, provider_requests
+        nonlocal labeled, failed, provider_requests, token_usage
         while True:
             target = await queue.get()
             if target is None or cancel_event.is_set():
@@ -104,7 +110,7 @@ async def execute_label_run(
                         effective_prompt,
                         representatives,
                         sleep=sleep,
-                    )
+                )
                 if cancel_event.is_set():
                     return
                 _persist_label(
@@ -118,6 +124,7 @@ async def execute_label_run(
                     result=result,
                 )
                 async with progress_lock:
+                    token_usage = add_token_usage(token_usage, result.token_usage)
                     labeled += 1
                     update_progress(run_id, {"labeled": labeled, "failed": failed, "total": total})
             except Exception:  # noqa: BLE001 - per-cluster failures are tracked in run stats.
@@ -145,6 +152,7 @@ async def execute_label_run(
         "providerRequests": provider_requests,
         "model": labeling_config["model"],
         "promptHash": prompt_hash,
+        "tokenUsage": token_usage_dict(token_usage),
     }
     update_stats(run_id, stats)
     if labeled == 0 and not cancel_event.is_set():

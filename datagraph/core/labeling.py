@@ -3,12 +3,20 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from openai import AsyncOpenAI
 
-from datagraph.core.openai_client import MAX_RETRY_ATTEMPTS, SleepFunc, _is_retryable, _retry_after
+from datagraph.core.openai_client import (
+    MAX_RETRY_ATTEMPTS,
+    SleepFunc,
+    TokenUsage,
+    _is_retryable,
+    _retry_after,
+    token_usage_from_response_usage,
+    zero_token_usage,
+)
 
 LABEL_RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -31,6 +39,7 @@ class LabelResult:
     key_signals: list[str]
     tags: list[str]
     coherent: bool
+    token_usage: TokenUsage = field(default_factory=zero_token_usage)
 
 
 class LabelProvider(Protocol):
@@ -70,7 +79,15 @@ class OpenAIChatLabelProvider:
             payload = json.loads(content)
         except json.JSONDecodeError as exc:
             raise LabelValidationError("label provider returned invalid JSON") from exc
-        return validate_label_result(payload)
+        result = validate_label_result(payload)
+        return LabelResult(
+            label=result.label,
+            summary=result.summary,
+            key_signals=result.key_signals,
+            tags=result.tags,
+            coherent=result.coherent,
+            token_usage=token_usage_from_response_usage(response.usage),
+        )
 
 
 def make_label_provider(

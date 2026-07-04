@@ -230,6 +230,13 @@ def run_benchmark(
             }
             for name, run in run_details.items()
         },
+        "tokenUsage": {
+            name: run["stats"].get(
+                "tokenUsage",
+                {"promptTokens": 0, "completionTokens": 0, "totalTokens": 0},
+            )
+            for name, run in run_details.items()
+        },
         "artifact": {
             "topics": len(artifact["topics"]),
             "records": len(artifact["data"]),
@@ -412,6 +419,7 @@ def _print_report(metrics: dict[str, Any]) -> None:
         f"surprising {metrics['evidence']['surprisingTopicsSeconds']}s, "
         f"topic {metrics['evidence']['topicEvidenceSeconds']}s"
     )
+    print(f"tokenUsage: {json.dumps(metrics['tokenUsage'], sort_keys=True)}")
     print(f"peak RSS: {metrics['rss']['peakMiB']} MiB")
     print(f"database: {metrics['database']['bytes']:,} bytes")
     print(f"vizUrl: {metrics['vizUrl']}")

@@ -22,7 +22,7 @@ ClockFunc = Callable[[], float]
 
 
 class EmbeddingProvider(Protocol):
-    async def embed_batch(self, texts: list[str]) -> list[np.ndarray]:
+    async def embed_batch(self, texts: list[str]) -> list[np.ndarray] | EmbeddingBatchResult:
         ...
 
 
@@ -30,6 +30,19 @@ class ProviderRetryError(RuntimeError):
     def __init__(self, message: str, *, retry_after: float | None = None) -> None:
         self.retry_after = retry_after
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class EmbeddingBatchResult:
+    vectors: list[np.ndarray]
+    prompt_tokens: int = 0
 
 
 class MockEmbeddingProvider:
@@ -64,7 +77,10 @@ class OpenAIEmbeddingProvider:
             kwargs["dimensions"] = self.dimensions
         response = await self.client.embeddings.create(**kwargs)
         ordered = sorted(response.data, key=lambda item: item.index)
-        return [normalize_l2(item.embedding) for item in ordered]
+        return EmbeddingBatchResult(
+            vectors=[normalize_l2(item.embedding) for item in ordered],
+            prompt_tokens=_usage_value(response.usage, "prompt_tokens"),
+        )
 
 
 @dataclass(frozen=True)
@@ -131,12 +147,15 @@ async def embed_with_retry(
     *,
     sleep: SleepFunc = asyncio.sleep,
     max_attempts: int = MAX_RETRY_ATTEMPTS,
-) -> tuple[list[np.ndarray], int]:
+) -> tuple[list[np.ndarray], int, int]:
     attempt = 0
     while True:
         attempt += 1
         try:
-            return await provider.embed_batch(texts), attempt
+            result = await provider.embed_batch(texts)
+            if isinstance(result, EmbeddingBatchResult):
+                return result.vectors, attempt, result.prompt_tokens
+            return result, attempt, 0
         except Exception as exc:  # noqa: BLE001 - provider boundary normalizes retryable failures.
             retry_after = _retry_after(exc)
             if attempt >= max_attempts or not _is_retryable(exc):
@@ -149,6 +168,46 @@ async def embed_with_retry(
                 else min(2 ** (attempt - 1), 8) + random.uniform(0, 0.05)
             )
             await sleep(delay)
+
+
+def token_usage_dict(usage: TokenUsage) -> dict[str, int]:
+    return {
+        "promptTokens": usage.prompt_tokens,
+        "completionTokens": usage.completion_tokens,
+        "totalTokens": usage.total_tokens,
+    }
+
+
+def zero_token_usage() -> TokenUsage:
+    return TokenUsage()
+
+
+def add_token_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage:
+    return TokenUsage(
+        prompt_tokens=left.prompt_tokens + right.prompt_tokens,
+        completion_tokens=left.completion_tokens + right.completion_tokens,
+        total_tokens=left.total_tokens + right.total_tokens,
+    )
+
+
+def token_usage_from_response_usage(usage: Any) -> TokenUsage:
+    prompt_tokens = _usage_value(usage, "prompt_tokens")
+    completion_tokens = _usage_value(usage, "completion_tokens")
+    total_tokens = _usage_value(usage, "total_tokens") or prompt_tokens + completion_tokens
+    return TokenUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+def _usage_value(usage: Any, field: str) -> int:
+    if usage is None:
+        return 0
+    value = getattr(usage, field, None)
+    if value is None and isinstance(usage, dict):
+        value = usage.get(field)
+    return int(value or 0)
 
 
 def make_embedding_provider(
