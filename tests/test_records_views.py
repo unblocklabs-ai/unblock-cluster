@@ -8,12 +8,12 @@ from fastapi.testclient import TestClient
 
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
+from tests.helpers import test_settings
 
 
 def _client(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(Settings(data_dir=tmp_path / "data", port=0)))
+    return TestClient(create_app(test_settings(tmp_path / "data")))
 
 
 def _create_graph(client: TestClient, *, text_fields: list[str] | None = None) -> dict[str, Any]:

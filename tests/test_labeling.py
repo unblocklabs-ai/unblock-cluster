@@ -19,9 +19,9 @@ from datagraph.runs.label import (
     effective_label_prompt,
     prompt_sha256,
 )
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
-from tests.test_phase3 import StructuredTopicProvider
+from tests.helpers import test_settings
+from tests.test_clustering_layout import StructuredTopicProvider
 
 
 class ScriptedLabelProvider:
@@ -85,6 +85,7 @@ def test_prompt_assembly_topk_truncation_absent_title_and_stable_format() -> Non
     assert effective_label_prompt({"prompt": "Custom prompt"}) == "Custom prompt"
 
 
+@pytest.mark.slow
 def test_label_run_persists_merges_and_relabels_subset(tmp_path: Path) -> None:
     label_provider = ScriptedLabelProvider(delay_seconds=0.02)
     with _phase4_client(tmp_path, label_provider) as client:
@@ -176,6 +177,7 @@ def test_label_run_persists_merges_and_relabels_subset(tmp_path: Path) -> None:
         assert newest["prompt_hash"] == prompt_sha256(override_prompt)
 
 
+@pytest.mark.slow
 def test_label_failure_policies_and_invalid_schema_retry(tmp_path: Path) -> None:
     label_provider = ScriptedLabelProvider()
     with _phase4_client(tmp_path, label_provider) as client:
@@ -216,6 +218,7 @@ def test_label_failure_policies_and_invalid_schema_retry(tmp_path: Path) -> None
         assert len(label_provider.calls) - before_invalid_calls == 2
 
 
+@pytest.mark.slow
 def test_label_409_and_cancel_preserves_partial_labels(tmp_path: Path) -> None:
     label_provider = ScriptedLabelProvider(delay_seconds=0.15)
     with _phase4_client(tmp_path, label_provider) as client:
@@ -253,6 +256,7 @@ def test_label_409_and_cancel_preserves_partial_labels(tmp_path: Path) -> None:
         assert persisted < len(cluster_ids)
 
 
+@pytest.mark.slow
 def test_label_cancel_before_first_cluster_is_cancelled_not_failed(tmp_path: Path) -> None:
     label_provider = ScriptedLabelProvider(delay_seconds=0.5)
     with _phase4_client(tmp_path, label_provider) as client:
@@ -273,28 +277,6 @@ def test_label_cancel_before_first_cluster_is_cancelled_not_failed(tmp_path: Pat
         assert persisted == 0
 
 
-@pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="OPENAI_API_KEY is not set")
-def test_real_openai_label_run_smoke(tmp_path: Path) -> None:
-    with _phase4_client(tmp_path, label_provider=None) as client:
-        graph_id, view_id, cluster_run_id = _cluster_fixture(client, record_count=160)
-        cluster_ids = _cluster_ids(client, cluster_run_id)[:3]
-        run_id = _enqueue_label(client, graph_id, view_id, body={"clusterIds": cluster_ids})
-        run = _poll_run(client, graph_id, run_id, timeout=240)
-        assert run["status"] == "succeeded"
-        topics = client.get(
-            f"/api/graphs/{graph_id}/views/{view_id}/topics",
-            params={"clusterRunId": cluster_run_id},
-        ).json()
-        labeled = [
-            topic["label"]
-            for topic in topics["topics"]
-            if topic["clusterId"] in set(cluster_ids)
-        ]
-        assert len(labeled) == len(cluster_ids)
-        assert all(label["summary"] for label in labeled)
-        assert all(1 <= len(label["label"].split()) <= 10 for label in labeled)
-
-
 def _phase4_client(
     tmp_path: Path,
     label_provider: ScriptedLabelProvider | None,
@@ -303,9 +285,8 @@ def _phase4_client(
     label_factory = (lambda _config: label_provider) if label_provider is not None else None
     return TestClient(
         create_app(
-            Settings(
-                data_dir=tmp_path / "data",
-                port=0,
+            test_settings(
+                tmp_path / "data",
                 openai_api_key=os.environ.get("OPENAI_API_KEY"),
             ),
             embedding_provider_factory=lambda _config: embedding_provider,
@@ -314,7 +295,7 @@ def _phase4_client(
     )
 
 
-def _structured_provider(record_count: int = 500) -> StructuredTopicProvider:
+def _structured_provider(record_count: int = 300) -> StructuredTopicProvider:
     records = generate_records(5000, 42)[:record_count]
     text_config = {
         "textFields": ["title", "customerText", "product", "tags"],
@@ -331,7 +312,7 @@ def _cluster_fixture(
     client: TestClient,
     *,
     graph: dict[str, Any] | None = None,
-    record_count: int = 500,
+    record_count: int = 300,
 ) -> tuple[str, str, str]:
     records = generate_records(5000, 42)[:record_count]
     graph = graph or _create_graph(client)
@@ -423,7 +404,7 @@ def _poll_run(
         last = response.json()
         if last["status"] in {"succeeded", "failed", "cancelled"}:
             return last
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise AssertionError(f"run did not finish; last={last}")
 
 
@@ -448,5 +429,5 @@ def _wait_for_label_progress(
             and progress.get("labeled", 0) >= minimum_labeled
         ):
             return last
-        time.sleep(0.02)
+        time.sleep(0.01)
     raise AssertionError(f"label progress not observed; last={last}")

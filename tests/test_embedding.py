@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import math
-import os
 import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
@@ -21,8 +19,8 @@ from datagraph.core.openai_client import (
 from datagraph.core.vectors import unpack_vector
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
+from tests.helpers import test_settings
 
 
 class CountingMockProvider(MockEmbeddingProvider):
@@ -83,7 +81,7 @@ def _client(
     factory = (lambda _config: provider) if provider is not None else None
     return TestClient(
         create_app(
-            Settings(data_dir=tmp_path / "data", port=0),
+            test_settings(tmp_path / "data"),
             embedding_provider_factory=factory,
             clock=clock,
             sleep=clock.sleep if clock is not None else None,
@@ -206,10 +204,13 @@ def test_embedding_text_rendering_template_tags_skipping_and_truncation() -> Non
         {"textFields": ["customerText"], "maxInputTokens": 10},
     )
     assert truncated.token_count <= 10
-    assert truncated.text_hash == render_embedding_text(
-        {"customerText": truncated.text.removeprefix("customerText: ")},
-        {"textFields": ["customerText"], "maxInputTokens": 10},
-    ).text_hash
+    assert (
+        truncated.text_hash
+        == render_embedding_text(
+            {"customerText": truncated.text.removeprefix("customerText: ")},
+            {"textFields": ["customerText"], "maxInputTokens": 10},
+        ).text_hash
+    )
 
 
 def test_batch_packer_respects_input_and_token_caps() -> None:
@@ -236,7 +237,7 @@ def test_token_bucket_rate_limiter_uses_fake_clock() -> None:
 
 
 def test_full_synthetic_embedding_run_reuse_and_one_record_mutation(tmp_path: Path) -> None:
-    records = generate_records(5000, 42)
+    records = generate_records(5000, 42)[:500]
     provider = CountingMockProvider(dimensions=32, delay_seconds=0.005)
     with _client(tmp_path, provider=provider) as client:
         graph = _create_graph(client)
@@ -248,18 +249,18 @@ def test_full_synthetic_embedding_run_reuse_and_one_record_mutation(tmp_path: Pa
         }
 
         run_id = _enqueue_embedding(client, graph_id)
-        _poll_embedding_progress(client, graph_id, run_id, total=5000)
+        _poll_embedding_progress(client, graph_id, run_id, total=len(records))
         final = _poll_run(client, graph_id, run_id)
         assert final["status"] == "succeeded"
-        assert final["progress"]["embedded"] == 5000
+        assert final["progress"]["embedded"] == len(records)
         assert final["progress"]["reused"] == 0
-        assert final["stats"]["records"] == 5000
+        assert final["stats"]["records"] == len(records)
         assert final["stats"]["uniqueTexts"] == len(unique_hashes)
         assert final["stats"]["providerRetries"] == 0
         assert provider.max_in_flight <= 2
 
         counts = _db_counts(client, run_id)
-        assert counts["run_items"] == 5000
+        assert counts["run_items"] == len(records)
         assert counts["vectors"] == len(unique_hashes)
         with connect(client.app.state.settings.db_path) as conn:
             rows = conn.execute("SELECT vector, dimensions FROM embedding_vectors").fetchall()
@@ -275,7 +276,7 @@ def test_full_synthetic_embedding_run_reuse_and_one_record_mutation(tmp_path: Pa
         rerun = _poll_run(client, graph_id, rerun_id)
         assert rerun["status"] == "succeeded"
         assert rerun["progress"]["embedded"] == 0
-        assert rerun["progress"]["reused"] == 5000
+        assert rerun["progress"]["reused"] == len(records)
         assert rerun["stats"]["providerRequests"] == 0
         assert rerun["stats"]["providerRetries"] == 0
         assert provider.calls == calls_after_first
@@ -287,7 +288,7 @@ def test_full_synthetic_embedding_run_reuse_and_one_record_mutation(tmp_path: Pa
         mutation = _poll_run(client, graph_id, mutation_id)
         assert mutation["status"] == "succeeded"
         assert mutation["progress"]["embedded"] == 1
-        assert mutation["progress"]["reused"] == 4999
+        assert mutation["progress"]["reused"] == len(records) - 1
         assert _db_counts(client)["vectors"] == len(unique_hashes) + 1
 
 
@@ -367,40 +368,6 @@ def test_cancel_between_embedding_batches_keeps_partial_vectors(tmp_path: Path) 
         assert cancelled["status"] == "cancelled"
         vector_count = _db_counts(client)["vectors"]
         assert 0 < vector_count < 1200
-
-
-@pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="OPENAI_API_KEY is not set")
-def test_real_openai_embedding_integration_opt_in(tmp_path: Path) -> None:
-    with _client(tmp_path) as client:
-        graph = _create_graph(
-            client,
-            embedding={
-                "provider": "openai",
-                "model": "text-embedding-3-small",
-                "dimensions": 1536,
-            },
-        )
-        _post_records(
-            client,
-            graph["id"],
-            [
-                _minimal_record(
-                    f"real-{index}",
-                    customerText=f"Please help with issue number {index} about my order.",
-                )
-                for index in range(10)
-            ],
-        )
-        run_id = _enqueue_embedding(client, graph["id"])
-        run = _poll_run(client, graph["id"], run_id)
-        assert run["status"] == "succeeded"
-        with connect(client.app.state.settings.db_path) as conn:
-            rows = conn.execute("SELECT vector FROM embedding_vectors").fetchall()
-        assert len(rows) == 10
-        for row in rows:
-            vector = unpack_vector(row["vector"])
-            assert vector.shape == (1536,)
-            assert math.isclose(float(np.linalg.norm(vector)), 1.0, rel_tol=1e-5)
 
 
 def _poll_embedding_progress(

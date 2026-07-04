@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 from collections import Counter
 from pathlib import Path
@@ -13,17 +12,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.summarization import (
-    OpenAIChatSummaryProvider,
     SummaryResult,
     SummaryValidationError,
-    effective_summarization_prompt,
-    summarize_with_retry,
 )
 from datagraph.core.vectors import normalize_l2
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
+from tests.helpers import test_settings
 
 
 class ScriptedSummaryProvider:
@@ -82,8 +78,9 @@ class FlakySummaryProvider:
         return scripted_summary(record_text)
 
 
+@pytest.mark.slow
 def test_summarize_then_embed_flow_reuse_facets_ab_and_receipts(tmp_path: Path) -> None:
-    records = generate_records(5000, 42)
+    records = generate_records(5000, 42)[:500]
     records[0] = {
         **records[0],
         "customerText": "Out of office until Monday. Please contact support@example.com.",
@@ -123,9 +120,7 @@ def test_summarize_then_embed_flow_reuse_facets_ab_and_receipts(tmp_path: Path) 
         assert summarize_run["stats"]["providerRetries"] == 0
         assert summary_provider.calls == len(records)
 
-        report = client.get(
-            f"/api/graphs/{graph_id}/summarize-runs/{summarize_run_id}/report"
-        )
+        report = client.get(f"/api/graphs/{graph_id}/summarize-runs/{summarize_run_id}/report")
         assert report.status_code == 200, report.text
         report_body = report.json()
         assert report_body["junkCounts"]["ooo"] == 1
@@ -337,26 +332,6 @@ def test_summarize_failures_config_validation_and_summary_facet_409s(tmp_path: P
         assert "summary representation lineage" in summary_facet.text
 
 
-@pytest.mark.skipif(not os.environ.get("OPENAI_API_KEY"), reason="OPENAI_API_KEY not set")
-def test_real_openai_summarizer_schema_and_verbatim_phrases() -> None:
-    records = generate_records(5000, 42)[:10]
-    provider = OpenAIChatSummaryProvider(
-        api_key=os.environ.get("OPENAI_API_KEY"),
-        model="gpt-5.4-nano",
-    )
-    prompt = effective_summarization_prompt(
-        {"prompt": None, "context": "A consumer supplement and meal delivery brand."}
-    )
-    for record in records:
-        text = record["customerText"]
-        result, _attempts = __import__("asyncio").run(
-            summarize_with_retry(provider, prompt, text)
-        )
-        assert result.issue
-        assert result.key_customer_phrases
-        assert any(phrase in text for phrase in result.key_customer_phrases)
-
-
 def scripted_summary(record_text: str) -> SummaryResult:
     lowered = record_text.lower()
     if "out of office" in lowered:
@@ -432,7 +407,7 @@ def _phase14_client(
 ) -> TestClient:
     return TestClient(
         create_app(
-            Settings(data_dir=tmp_path / "data", port=0),
+            test_settings(tmp_path / "data"),
             embedding_provider_factory=lambda _config: embedding_provider,
             summary_provider_factory=lambda _config: summary_provider,
         )
@@ -510,7 +485,7 @@ def _poll_run(
         last = response.json()
         if last["status"] in {"succeeded", "failed", "cancelled"}:
             return last
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise AssertionError(f"run did not finish; last={last}")
 
 

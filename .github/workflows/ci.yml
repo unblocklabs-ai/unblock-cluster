@@ -57,7 +57,7 @@ jobs:
         run: .venv/bin/ruff check .
 
       - name: Pytest
-        run: .venv/bin/python -m pytest
+        run: .venv/bin/python -m pytest -n auto
 
       - name: Node tests
         run: node --test tests/*.test.mjs

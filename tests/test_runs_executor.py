@@ -16,9 +16,9 @@ from datagraph.core.embeddings import MockEmbeddingProvider
 from datagraph.core.ids import now_iso
 from datagraph.db import connect, initialize_database
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records, write_records
 from tests.conftest import insert_graph_for_tests
+from tests.helpers import test_settings
 
 
 def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
@@ -63,7 +63,7 @@ def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
 
 
 def _client(tmp_path: Path) -> TestClient:
-    settings = Settings(data_dir=tmp_path / "data", port=0)
+    settings = test_settings(tmp_path / "data")
     return TestClient(create_app(settings))
 
 
@@ -76,7 +76,7 @@ def _poll_status(client: TestClient, graph_id: str, run_id: str, status: str) ->
         last = response.json()
         if last["status"] == status:
             return last
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise AssertionError(f"run did not reach {status}; last={last}")
 
 
@@ -119,7 +119,7 @@ def test_cancel_queued_run_yields_cancelled(tmp_path: Path) -> None:
 
 
 def test_startup_recovery_marks_running_run_failed(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path / "data", port=0)
+    settings = test_settings(tmp_path / "data")
     initialize_database(settings.db_path)
     graph_id = "grf_recovery"
     run_id = "run_recovery"

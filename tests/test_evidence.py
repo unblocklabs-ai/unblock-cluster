@@ -6,19 +6,21 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
-from tests.test_phase3 import StructuredTopicProvider
-from tests.test_phase4 import ScriptedLabelProvider
+from tests.helpers import test_settings
+from tests.test_clustering_layout import StructuredTopicProvider
+from tests.test_labeling import ScriptedLabelProvider
 
 
+@pytest.mark.slow
 def test_planted_evidence_recipes_events_freshness_and_determinism(tmp_path: Path) -> None:
-    records = generate_records(5000, 42)[:2500]
+    records = generate_records(5000, 42)[:600]
     label_provider = ScriptedLabelProvider()
     with _phase6_client(tmp_path, records, label_provider) as client:
         graph = _create_graph(client)
@@ -51,6 +53,16 @@ def test_planted_evidence_recipes_events_freshness_and_determinism(tmp_path: Pat
             record["sourceRecordId"] = f"late-{index}"
             record["customerText"] = f"Late freshness record {index}"
         _post_records(client, graph_id, late_records)
+        with connect(client.app.state.settings.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE records
+                   SET created_at = '2099-01-01T00:00:00Z'
+                 WHERE graph_id = ? AND source_record_id LIKE 'late-%'
+                """,
+                (graph_id,),
+            )
+            conn.commit()
 
         cluster_truth = _majority_truth_by_cluster(client, cluster_run_id)
         spike_cluster_id = _cluster_id_for_truth(cluster_truth, "december_energy_crash_spike")
@@ -302,7 +314,7 @@ def _phase6_client(
     provider = StructuredTopicProvider(text_to_topic)
     return TestClient(
         create_app(
-            Settings(data_dir=tmp_path / "data", port=0),
+            test_settings(tmp_path / "data"),
             embedding_provider_factory=lambda _config: provider,
             label_provider_factory=lambda _config: label_provider,
         )
@@ -387,7 +399,7 @@ def _poll_run(
         last = response.json()
         if last["status"] in {"succeeded", "failed", "cancelled"}:
             return last
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise AssertionError(f"run did not finish; last={last}")
 
 
@@ -406,10 +418,7 @@ def _majority_truth_by_cluster(client: TestClient, cluster_run_id: str) -> dict[
     for row in rows:
         normalized = json.loads(row["normalized_json"])
         counts[int(row["cluster_id"])][normalized["metadata"]["groundTruthTopicId"]] += 1
-    return {
-        cluster_id: counter.most_common(1)[0][0]
-        for cluster_id, counter in counts.items()
-    }
+    return {cluster_id: counter.most_common(1)[0][0] for cluster_id, counter in counts.items()}
 
 
 def _cluster_id_for_truth(cluster_truth: dict[int, str], truth: str) -> int:

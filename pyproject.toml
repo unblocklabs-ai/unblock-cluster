@@ -1,6 +1,9 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+  "slow: load-bearing or scale-oriented tests excluded from the fast inner-loop tier",
+]
 
 [tool.ruff]
 line-length = 100

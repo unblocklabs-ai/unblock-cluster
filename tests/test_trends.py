@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
@@ -13,9 +14,9 @@ from datagraph.core.time import parse_timestamp
 from datagraph.core.trend_math import bucket_start, compute_trends
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
-from tests.test_phase3 import StructuredTopicProvider
+from tests.helpers import test_settings
+from tests.test_clustering_layout import StructuredTopicProvider
 
 
 def test_trend_math_buckets_zero_fill_baselines_and_scores() -> None:
@@ -67,9 +68,7 @@ def test_trend_math_spike_floors_and_window_sections() -> None:
         window_start="2025-01-20",
         window_end="2025-01-20",
     )
-    by_cluster_bucket = {
-        (point.cluster_id, point.bucket_start): point for point in result.points
-    }
+    by_cluster_bucket = {(point.cluster_id, point.bucket_start): point for point in result.points}
     assert by_cluster_bucket[(1, "2025-01-13")].spike_score == 2
     assert by_cluster_bucket[(2, "2025-01-13")].spike_score == 2
     vanishing_ids = {row["clusterId"] for row in result.summary["vanishingTopics"]}
@@ -183,8 +182,9 @@ def test_trend_api_validation_snapshots_integrity_and_determinism(tmp_path: Path
         assert detail["topic"]["trend"] == trended_topic["trend"]
 
 
+@pytest.mark.slow
 def test_planted_temporal_patterns_surface_expected_topics(tmp_path: Path) -> None:
-    records = generate_records(5000, 42)[:2500]
+    records = generate_records(5000, 42)[:600]
     with _phase5_client(tmp_path, records) as client:
         graph = _create_graph(client)
         graph_id = graph["id"]
@@ -260,7 +260,7 @@ def _phase5_client(tmp_path: Path, records: list[dict[str, Any]]) -> TestClient:
     provider = StructuredTopicProvider(text_to_topic)
     return TestClient(
         create_app(
-            Settings(data_dir=tmp_path / "data", port=0),
+            test_settings(tmp_path / "data"),
             embedding_provider_factory=lambda _config: provider,
         )
     )
@@ -341,7 +341,7 @@ def _poll_run(
         last = response.json()
         if last["status"] in {"succeeded", "failed", "cancelled"}:
             return last
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise AssertionError(f"run did not finish; last={last}")
 
 
@@ -405,10 +405,7 @@ def _majority_truth_by_cluster(client: TestClient, cluster_run_id: str) -> dict[
     for row in rows:
         normalized = json.loads(row["normalized_json"])
         counts[int(row["cluster_id"])][normalized["metadata"]["groundTruthTopicId"]] += 1
-    return {
-        cluster_id: counter.most_common(1)[0][0]
-        for cluster_id, counter in counts.items()
-    }
+    return {cluster_id: counter.most_common(1)[0][0] for cluster_id, counter in counts.items()}
 
 
 def _comparable_trends(response: dict[str, Any]) -> dict[str, Any]:

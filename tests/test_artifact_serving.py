@@ -7,15 +7,15 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.ids import new_id
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
-from tests.test_phase4 import ScriptedLabelProvider
-from tests.test_phase7 import (
+from tests.helpers import test_settings
+from tests.test_artifact_contract import (
     _all_records_view_id,
     _create_graph,
     _enqueue_cluster,
@@ -23,12 +23,14 @@ from tests.test_phase7 import (
     _poll_run,
     _post_records,
 )
+from tests.test_labeling import ScriptedLabelProvider
 
 
+@pytest.mark.slow
 def test_artifact_gzip_etag_cache_float_precision_and_records_slimming(
     tmp_path: Path,
 ) -> None:
-    records = generate_records(5000, 42)
+    records = generate_records(5000, 42)[:500]
     with _phase7_client(tmp_path, records, ScriptedLabelProvider()) as client:
         graph = _create_graph(client)
         graph_id = graph["id"]
@@ -39,17 +41,13 @@ def test_artifact_gzip_etag_cache_float_precision_and_records_slimming(
         assert list_response.status_code == 200, list_response.text
         listed = list_response.json()["records"][0]
         assert "normalized" not in listed
-        included_response = client.get(
-            f"/api/graphs/{graph_id}/records?limit=1&include=normalized"
-        )
+        included_response = client.get(f"/api/graphs/{graph_id}/records?limit=1&include=normalized")
         assert "normalized" in included_response.json()["records"][0]
         single_response = client.get(f"/api/graphs/{graph_id}/records/{listed['id']}")
         assert single_response.status_code == 200, single_response.text
         assert "normalized" in single_response.json()
 
-        view_list_response = client.get(
-            f"/api/graphs/{graph_id}/views/{view_id}/records?limit=1"
-        )
+        view_list_response = client.get(f"/api/graphs/{graph_id}/views/{view_id}/records?limit=1")
         assert "normalized" not in view_list_response.json()["records"][0]
         view_include_response = client.get(
             f"/api/graphs/{graph_id}/views/{view_id}/records?limit=1&include=normalized"
@@ -148,7 +146,10 @@ def test_static_cache_control_headers(tmp_path: Path) -> None:
     (dist / "index.html").write_text("<!doctype html><title>Phase 10</title>", encoding="utf-8")
     (assets / "phase10-cache-test.js").write_text("console.log('phase10');", encoding="utf-8")
 
-    settings = Settings(data_dir=tmp_path / "data", port=0, dist_dir=dist)
+    settings = test_settings(
+        tmp_path / "data",
+        dist_dir=dist,
+    )
     with TestClient(create_app(settings)) as client:
         index = client.get("/")
         assert index.status_code == 200

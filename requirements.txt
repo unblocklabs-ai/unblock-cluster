@@ -7,4 +7,6 @@ hdbscan==0.8.44
 openai==2.14.0
 tiktoken==0.12.0
 pytest==9.0.2
+# Dev/test-only: parallel pytest execution for the local and CI suites.
+pytest-xdist==3.8.0
 ruff==0.15.20

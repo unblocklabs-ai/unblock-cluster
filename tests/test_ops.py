@@ -4,27 +4,35 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.ids import now_iso
 from datagraph.db import connect
 from datagraph.main import READ_ONLY_MESSAGE, create_app
-from datagraph.settings import Settings
 from scripts.bench_scale import run_benchmark
-from tests.test_phase1 import _minimal_record
+from tests.helpers import test_settings
+from tests.test_records_views import _minimal_record
 
 
 def test_read_only_mode_blocks_mutations_but_allows_gets_static_and_evidence(
     tmp_path: Path,
 ) -> None:
     data_dir = tmp_path / "data"
-    with TestClient(create_app(Settings(data_dir=data_dir, port=0))) as client:
+    with TestClient(create_app(test_settings(data_dir))) as client:
         graph = _create_graph(client)
         graph_id = graph["id"]
         view_id = graph["views"][0]["id"]
         run_id = _insert_run(client, graph_id=graph_id, view_id=view_id, status="queued")
 
-    with TestClient(create_app(Settings(data_dir=data_dir, port=0, read_only=True))) as client:
+    with TestClient(
+        create_app(
+            test_settings(
+                data_dir,
+                read_only=True,
+            )
+        )
+    ) as client:
         assert client.get("/api/health").status_code == 200
         assert client.get(f"/api/graphs/{graph_id}").status_code == 200
 
@@ -64,7 +72,7 @@ def test_read_only_mode_blocks_mutations_but_allows_gets_static_and_evidence(
 
 
 def test_delete_view_removes_only_view_scoped_runs_and_outputs(tmp_path: Path) -> None:
-    with TestClient(create_app(Settings(data_dir=tmp_path / "data", port=0))) as client:
+    with TestClient(create_app(test_settings(tmp_path / "data"))) as client:
         graph = _create_graph(client)
         graph_id = graph["id"]
         all_records_view_id = graph["views"][0]["id"]
@@ -105,7 +113,7 @@ def test_delete_view_removes_only_view_scoped_runs_and_outputs(tmp_path: Path) -
 
 
 def test_delete_run_requires_terminal_and_not_view_default(tmp_path: Path) -> None:
-    with TestClient(create_app(Settings(data_dir=tmp_path / "data", port=0))) as client:
+    with TestClient(create_app(test_settings(tmp_path / "data"))) as client:
         graph = _create_graph(client)
         graph_id = graph["id"]
         view_id = graph["views"][0]["id"]
@@ -137,6 +145,7 @@ def test_delete_run_requires_terminal_and_not_view_default(tmp_path: Path) -> No
             assert _count_rows(conn, "cluster_summaries", "run_id", terminal_run_id) == 0
 
 
+@pytest.mark.slow
 def test_scale_benchmark_smoke_path(tmp_path: Path) -> None:
     metrics = run_benchmark(data_dir=tmp_path / "bench", size=500, port=0)
 
