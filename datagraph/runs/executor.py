@@ -13,11 +13,13 @@ from typing import Any, Literal
 from datagraph.core.ids import new_id, now_iso
 from datagraph.core.labeling import LabelProvider
 from datagraph.core.openai_client import ClockFunc, EmbeddingProvider, SleepFunc
+from datagraph.core.summarization import SummaryProvider
 from datagraph.db import connect, fetch_all, fetch_one
 from datagraph.runs.cluster import execute_cluster_job
 from datagraph.runs.embed import EmbeddingRunCancelled, execute_embedding_run
 from datagraph.runs.label import execute_label_run
 from datagraph.runs.layout import execute_layout_job
+from datagraph.runs.summarize import execute_summarize_run
 from datagraph.runs.trend import execute_trend_run
 
 RUN_STATUSES = {"queued", "running", "succeeded", "failed", "cancelled"}
@@ -40,6 +42,7 @@ class RunExecutor:
         *,
         embedding_provider_factory: Callable[[dict[str, Any]], EmbeddingProvider] | None = None,
         label_provider_factory: Callable[[dict[str, Any]], LabelProvider] | None = None,
+        summary_provider_factory: Callable[[dict[str, Any]], SummaryProvider] | None = None,
         openai_api_key: str | None = None,
         clock: ClockFunc | None = None,
         sleep: SleepFunc | None = None,
@@ -49,6 +52,7 @@ class RunExecutor:
             "noop": RunSpec(kind="io"),
             "cpu_noop": RunSpec(kind="cpu"),
             "embed": RunSpec(kind="io"),
+            "summarize": RunSpec(kind="io"),
             "cluster": RunSpec(kind="cpu"),
             "layout": RunSpec(kind="cpu"),
             "label": RunSpec(kind="io"),
@@ -56,6 +60,7 @@ class RunExecutor:
         }
         self._embedding_provider_factory = embedding_provider_factory
         self._label_provider_factory = label_provider_factory
+        self._summary_provider_factory = summary_provider_factory
         self._openai_api_key = openai_api_key
         self._clock = clock or time.monotonic
         self._sleep = sleep or asyncio.sleep
@@ -250,6 +255,8 @@ class RunExecutor:
                 await self._run_embed(row, params, cancel_event)
             elif row["type"] == "label":
                 await self._run_label(row, params, cancel_event)
+            elif row["type"] == "summarize":
+                await self._run_summarize(row, params, cancel_event)
             elif row["type"] == "trend":
                 self._run_trend(row, params)
             else:
@@ -326,6 +333,9 @@ class RunExecutor:
                 run_id=row["id"],
                 graph_id=row["graph_id"],
                 embedding_config=params["embedding"],
+                representation=params.get("representation", "raw"),
+                include_junk=params.get("includeJunk", False),
+                summarize_run_id=params.get("summarizeRunId"),
                 cancel_event=cancel_event,
                 update_progress=self._update_progress,
                 update_stats=self._update_stats,
@@ -357,6 +367,27 @@ class RunExecutor:
             update_stats=self._update_stats,
             provider_factory=self._label_provider_factory,
             openai_api_key=self._openai_api_key,
+            sleep=self._sleep,
+        )
+
+    async def _run_summarize(
+        self,
+        row: dict,
+        params: dict[str, Any],
+        cancel_event: asyncio.Event,
+    ) -> None:
+        await execute_summarize_run(
+            db_path=self.db_path,
+            run_id=row["id"],
+            graph_id=row["graph_id"],
+            embedding_config=params["embedding"],
+            summarization_config=params["summarization"],
+            cancel_event=cancel_event,
+            update_progress=self._update_progress,
+            update_stats=self._update_stats,
+            provider_factory=self._summary_provider_factory,
+            openai_api_key=self._openai_api_key,
+            clock=self._clock,
             sleep=self._sleep,
         )
 

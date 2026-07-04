@@ -5,7 +5,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from datagraph.api.facets import facet_counts_by_cluster, validate_facet_by
+from datagraph.api.facets import (
+    facet_counts_by_cluster,
+    summarize_run_id_for_cluster_run,
+    validate_facet_by,
+)
 from datagraph.core.ids import new_id, now_iso
 from datagraph.core.scope import ScopeValidationError, compile_scope
 from datagraph.core.time import TimestampValidationError, parse_timestamp
@@ -72,7 +76,12 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
     with connect(db_path) as conn:
         summaries = _load_cluster_summaries(conn, cluster_run_id)
         labels = _latest_labels_by_cluster(conn, cluster_run_id)
-        facets = facet_counts_by_cluster(conn, cluster_run_id, facet_by)
+        facets = facet_counts_by_cluster(
+            conn,
+            cluster_run_id,
+            facet_by,
+            summarize_run_id=summarize_run_id_for_cluster_run(conn, cluster_run),
+        )
         label_run_id = _matching_default_label_run_id(conn, graph_id, view_id, cluster_run_id)
         input_refs = json.loads(cluster_run["input_refs_json"])
         run_refs = {

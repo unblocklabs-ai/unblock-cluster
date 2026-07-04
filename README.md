@@ -206,9 +206,73 @@ curl -sS -X POST "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/evidence" \
 ```
 
 Allowed `facetBy` values are `sourceType`, `sourceName`, `product`, `sku`,
-`sentiment`, `rating`, `tags`, and `metadata.<key>`. Null or absent values are
-bucketed as `"(none)"`; high-cardinality facets return the top 20 values plus
-`"(other)"`.
+`sentiment`, `rating`, `tags`, `metadata.<key>`, and, for summary-backed
+embedding runs, `summary.issue`, `summary.product`,
+`summary.desiredResolution`, `summary.sentiment`, or `summary.junkType`. Null
+or absent values are bucketed as `"(none)"`; high-cardinality facets return the
+top 20 values plus `"(other)"`.
+
+### Summarize-Then-Embed (Optional)
+
+Raw embedding remains the default. Use summarize-then-embed when regex junk
+filtering is turning into whack-a-mole, source text length varies wildly, or
+the source lacks useful facets such as product family, issue taxonomy, desired
+resolution, or semantic junk type. The summarize run makes one structured
+`gpt-5.4-nano` extraction call per record against the service-owned schema,
+caches results by rendered raw text plus prompt hash, and stores a stable
+labeled-line summary representation for optional embedding.
+
+```sh
+SUMMARY_RUN_ID=$(
+  curl -sS -X POST "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/summarize" \
+    -H 'Content-Type: application/json' \
+    -d '{"summarization":{"context":"Acme sells supplements and meal delivery. Real support traffic is about orders, spoiled deliveries, subscriptions, refunds, product guidance, and shipping."}}' \
+    | jq -r .id
+)
+
+SUMMARY_EMBED_RUN_ID=$(
+  curl -sS -X POST "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/embeddings" \
+    -H 'Content-Type: application/json' \
+    -d '{"representation":"summary"}' | jq -r .id
+)
+
+curl -sS -X POST "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/views/$VIEW_ID/cluster" \
+  -H 'Content-Type: application/json' \
+  -d '{"embeddingRunId":"'$SUMMARY_EMBED_RUN_ID'","setDefault":false}'
+```
+
+`summarization.context` is optional static brand/service background, capped at
+4,000 characters. It is appended to the built-in prompt and included in
+`promptHash`, so changing context or `summarization.prompt` correctly
+invalidates cached summaries. Use it to teach the semantic junk gate what
+counts as real support traffic for this business.
+
+The A/B workflow is one graph, two embedding runs, and two cluster runs: keep a
+raw embedding run as the control, create a summary embedding run, cluster each
+with explicit `embeddingRunId`, then compare the same canonical questions
+against `?clusterRunId=` overrides. Watch for suspiciously merged topics; that
+is a homogenization smell and means the summary prompt is erasing customer
+vocabulary. The built-in prompt explicitly asks for verbatim customer phrases
+to preserve that signal.
+
+Summary representation excludes records whose `junkType` is not `"none"` by
+default at the embedding boundary. Use `{"representation":"summary",
+"includeJunk":true}` only when intentionally inspecting the semantic junk
+bucket. Summary facets resolve through the run lineage, so
+`facetBy=summary.product` works only for clusters produced from a summary
+embedding run; raw clusters return a 422 with the summarize/embed path to run.
+
+Summarization cost and latency are per-record LLM calls. Content-addressing
+amortizes reruns: unchanged records with the same effective prompt reuse
+stored summaries with zero provider calls, while changed records or prompt/
+context changes summarize again. Inspect the derived artifacts through
+`GET /api/graphs/:gid/summarize-runs/:runId/report`, which reports junk counts
+by type and per-record summary fields for agent drop/keep decisions.
+
+Receipts stay raw. Topic representatives, topic-record reads, evidence
+payloads, and the frontend artifact continue to show raw `customerText`, never
+the summary representation. Summaries are derived artifacts for embedding,
+faceting, and the summarize-run report.
 
 Minimum pipeline:
 
@@ -227,14 +291,16 @@ Minimum pipeline:
    response. It includes an auto-created `all_records` view — its id is the
    `:vid` used below.
 2. `POST /api/graphs/:gid/records` in batches of at most 1000.
-3. `POST /api/graphs/:gid/embeddings` (body may override any `embedding.*`
+3. Optional: `POST /api/graphs/:gid/summarize`, then embed with
+   `{"representation":"summary"}`.
+4. `POST /api/graphs/:gid/embeddings` (body may override any `embedding.*`
    config key, e.g. `requestsPerMinute` / `maxConcurrency` to stay inside the
    API key's rate limits without going serial).
-4. `POST /api/graphs/:gid/views/:vid/cluster`.
-5. `POST /api/graphs/:gid/views/:vid/layout`.
-6. Optional: `POST /api/graphs/:gid/views/:vid/label`.
-7. Optional: `POST /api/graphs/:gid/views/:vid/trends`.
-8. Open `/?graphId=...&viewId=...` or fetch evidence.
+5. `POST /api/graphs/:gid/views/:vid/cluster`.
+6. `POST /api/graphs/:gid/views/:vid/layout`.
+7. Optional: `POST /api/graphs/:gid/views/:vid/label`.
+8. Optional: `POST /api/graphs/:gid/views/:vid/trends`.
+9. Open `/?graphId=...&viewId=...` or fetch evidence.
 
 Every POST above returns a run. Poll `GET /api/graphs/:gid/runs/:runId` until
 `status` is `succeeded` (or `failed` with `errorText`) before the next step;
@@ -295,6 +361,7 @@ All expensive work is represented in the uniform `runs` table:
 Run types:
 
 - `embed`: async OpenAI or deterministic mock embeddings, with vector reuse.
+- `summarize`: async per-record structured extraction, with summary reuse.
 - `cluster`: process-pool UMAP/HDBSCAN or no-reduction clustering.
 - `layout`: process-pool UMAP 2D projection.
 - `label`: async per-topic LLM labeling, with scripted providers in tests/demo.
@@ -302,6 +369,9 @@ Run types:
 
 The artifact and evidence endpoints are synchronous reads. They create no runs
 and make no provider calls.
+
+Summarize-run reports are synchronous reads:
+`GET /api/graphs/:gid/summarize-runs/:runId/report`.
 
 ## Artifact Endpoint
 
@@ -437,12 +507,13 @@ last-write-wins. Unchanged text is never re-embedded.
 Extraction, pre-filtering, aggregation, and redaction belong to agents before
 upload — this service has no redaction pipeline. With `provider: "openai"`,
 customer text leaves the machine at two points: embedding runs send every
-record's rendered text, and label runs (optional — but whenever one is
+record's rendered text, summarize runs (optional) send every record's rendered
+raw text to `gpt-5.4-nano`, and label runs (optional — but whenever one is
 triggered) send each topic's representative record text to `gpt-5.4-mini`.
-Skipping labeling skips that second flow; nothing else transmits customer
-text. Redact or drop sensitive values before upload. The demo, tests, mock
-embeddings, evidence reads, artifact reads, and frontend build make no
-network calls.
+Skipping summarization or labeling skips those optional flows; nothing else
+transmits customer text. Redact or drop sensitive values before upload. The
+demo, default tests, mock embeddings, scripted summarization, evidence reads,
+artifact reads, and frontend build make no network calls.
 
 ## Checks
 

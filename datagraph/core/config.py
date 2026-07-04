@@ -33,6 +33,14 @@ DEFAULT_GRAPH_CONFIG: dict[str, Any] = {
     },
     "layout": {"method": "umap", "nNeighbors": 30, "minDist": 0.1},
     "labeling": {"provider": "openai", "model": "gpt-5.4-mini", "topK": 12, "prompt": None},
+    "summarization": {
+        "provider": "openai",
+        "model": "gpt-5.4-nano",
+        "context": None,
+        "requestsPerMinute": 500,
+        "maxConcurrency": 4,
+        "prompt": None,
+    },
     "time": {"timestampField": "timestamp", "bucket": "week"},
 }
 
@@ -119,6 +127,65 @@ def validate_graph_config(config: Any, *, require_text_fields: bool = True) -> d
     if prompt is not None and not isinstance(prompt, str):
         errors.append(
             {"field": "config.labeling.prompt", "message": "must be a string or null"}
+        )
+
+    summarization = normalized["summarization"]
+    summarization_provider = summarization.get("provider")
+    if summarization_provider != "openai":
+        errors.append(
+            {
+                "field": "config.summarization.provider",
+                "message": 'must be "openai"',
+            }
+        )
+    if not isinstance(summarization.get("model"), str) or not summarization["model"].strip():
+        errors.append(
+            {"field": "config.summarization.model", "message": "must be a non-empty string"}
+        )
+    context = summarization.get("context")
+    if context is not None:
+        if not isinstance(context, str):
+            errors.append(
+                {
+                    "field": "config.summarization.context",
+                    "message": "must be a string or null",
+                }
+            )
+        elif len(context) > 4000:
+            errors.append(
+                {
+                    "field": "config.summarization.context",
+                    "message": "must be at most 4000 characters",
+                }
+            )
+    summarization_prompt = summarization.get("prompt")
+    if summarization_prompt is not None and not isinstance(summarization_prompt, str):
+        errors.append(
+            {"field": "config.summarization.prompt", "message": "must be a string or null"}
+        )
+    requests_per_minute = summarization.get("requestsPerMinute")
+    if (
+        not isinstance(requests_per_minute, int)
+        or isinstance(requests_per_minute, bool)
+        or requests_per_minute < 1
+    ):
+        errors.append(
+            {
+                "field": "config.summarization.requestsPerMinute",
+                "message": "must be an integer greater than or equal to 1",
+            }
+        )
+    max_concurrency = summarization.get("maxConcurrency")
+    if (
+        not isinstance(max_concurrency, int)
+        or isinstance(max_concurrency, bool)
+        or max_concurrency < 1
+    ):
+        errors.append(
+            {
+                "field": "config.summarization.maxConcurrency",
+                "message": "must be an integer greater than or equal to 1",
+            }
         )
 
     time_config = normalized["time"]
@@ -224,6 +291,30 @@ def apply_labeling_overrides(
         )
     merged = deepcopy(current)
     merged["labeling"] = {**merged["labeling"], **overrides}
+    return validate_graph_config(merged, require_text_fields=True)
+
+
+def apply_summarization_overrides(
+    current: dict[str, Any],
+    overrides: Any,
+) -> dict[str, Any]:
+    if overrides is None:
+        overrides = {}
+    if not isinstance(overrides, dict):
+        raise ConfigValidationError([{"field": "summarization", "message": "must be an object"}])
+    unknown = sorted(set(overrides) - set(DEFAULT_GRAPH_CONFIG["summarization"]))
+    if unknown:
+        raise ConfigValidationError(
+            [
+                {
+                    "field": f"summarization.{key}",
+                    "message": "unknown summarization config key",
+                }
+                for key in unknown
+            ]
+        )
+    merged = deepcopy(current)
+    merged["summarization"] = {**merged["summarization"], **overrides}
     return validate_graph_config(merged, require_text_fields=True)
 
 

@@ -15,9 +15,11 @@ from datagraph.api.evidence import router as evidence_router
 from datagraph.api.graphs import router as graphs_router
 from datagraph.api.records import router as records_router
 from datagraph.api.runs import router as runs_router
+from datagraph.api.summarize import router as summarize_router
 from datagraph.api.views import router as views_router
 from datagraph.core.labeling import LabelProvider
 from datagraph.core.openai_client import ClockFunc, EmbeddingProvider, SleepFunc
+from datagraph.core.summarization import SummaryProvider
 from datagraph.db import initialize_database
 from datagraph.models import HealthResponse
 from datagraph.runs.executor import RunExecutor
@@ -39,6 +41,7 @@ def create_app(
     *,
     embedding_provider_factory: Callable[[dict], EmbeddingProvider] | None = None,
     label_provider_factory: Callable[[dict], LabelProvider] | None = None,
+    summary_provider_factory: Callable[[dict], SummaryProvider] | None = None,
     clock: ClockFunc | None = None,
     sleep: SleepFunc | None = None,
 ) -> FastAPI:
@@ -51,6 +54,7 @@ def create_app(
             resolved_settings.db_path,
             embedding_provider_factory=embedding_provider_factory,
             label_provider_factory=label_provider_factory,
+            summary_provider_factory=summary_provider_factory,
             openai_api_key=resolved_settings.openai_api_key,
             clock=clock,
             sleep=sleep,
@@ -95,6 +99,7 @@ def create_app(
     app.include_router(graphs_router)
     app.include_router(records_router)
     app.include_router(embeddings_router)
+    app.include_router(summarize_router)
     app.include_router(runs_router)
     app.include_router(views_router)
     app.include_router(evidence_router)

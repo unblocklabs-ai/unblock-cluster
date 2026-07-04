@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Callable
@@ -42,10 +43,29 @@ async def execute_embedding_run(
     openai_api_key: str | None,
     clock: ClockFunc,
     sleep: SleepFunc,
+    representation: str = "raw",
+    include_junk: bool = False,
+    summarize_run_id: str | None = None,
 ) -> None:
     model = embedding_config["model"]
     dimensions = int(embedding_config.get("dimensions") or 1536)
-    records = _load_record_snapshot(db_path, graph_id)
+    if representation == "summary":
+        records, representation_stats = _load_summary_snapshot(
+            db_path,
+            graph_id,
+            embedding_config,
+            summarize_run_id,
+            include_junk=include_junk,
+        )
+    else:
+        records = _load_raw_snapshot(db_path, graph_id, embedding_config)
+        representation_stats = {
+            "representation": "raw",
+            "includeJunk": False,
+            "missingSummaries": 0,
+            "skippedJunk": 0,
+            "sourceRecords": len(records),
+        }
     total = len(records)
     update_progress(run_id, {"embedded": 0, "reused": 0, "total": total})
     if total == 0:
@@ -59,6 +79,7 @@ async def execute_embedding_run(
                 "providerRetries": 0,
                 "model": model,
                 "dimensions": dimensions,
+                **representation_stats,
             },
         )
         return
@@ -67,11 +88,9 @@ async def execute_embedding_run(
     by_hash: dict[str, list[str]] = defaultdict(list)
     text_by_hash: dict[str, str] = {}
     for row in records:
-        normalized = json.loads(row["normalized_json"])
-        rendered_text = render_embedding_text(normalized, embedding_config)
-        rendered.append((row["id"], rendered_text.text_hash, rendered_text.text))
-        by_hash[rendered_text.text_hash].append(row["id"])
-        text_by_hash.setdefault(rendered_text.text_hash, rendered_text.text)
+        rendered.append((row["id"], row["textHash"], row["text"]))
+        by_hash[row["textHash"]].append(row["id"])
+        text_by_hash.setdefault(row["textHash"], row["text"])
 
     _insert_embedding_items(db_path, run_id, rendered)
     existing_hashes = _existing_vector_hashes(db_path, model, dimensions, list(by_hash))
@@ -92,6 +111,7 @@ async def execute_embedding_run(
                 "providerRetries": 0,
                 "model": model,
                 "dimensions": dimensions,
+                **representation_stats,
             },
         )
         return
@@ -164,6 +184,7 @@ async def execute_embedding_run(
                 "providerRetries": provider_retries,
                 "model": model,
                 "dimensions": dimensions,
+                **representation_stats,
             },
         )
         raise
@@ -183,13 +204,18 @@ async def execute_embedding_run(
             "providerRetries": provider_retries,
             "model": model,
             "dimensions": dimensions,
+            **representation_stats,
         },
     )
 
 
-def _load_record_snapshot(db_path: Path, graph_id: str) -> list[dict]:
+def _load_raw_snapshot(
+    db_path: Path,
+    graph_id: str,
+    embedding_config: dict[str, Any],
+) -> list[dict[str, Any]]:
     with connect(db_path) as conn:
-        return fetch_all(
+        rows = fetch_all(
             conn,
             """
             SELECT id, normalized_json
@@ -199,6 +225,87 @@ def _load_record_snapshot(db_path: Path, graph_id: str) -> list[dict]:
             """,
             (graph_id,),
         )
+    rendered = []
+    for row in rows:
+        normalized = json.loads(row["normalized_json"])
+        rendered_text = render_embedding_text(normalized, embedding_config)
+        rendered.append(
+            {"id": row["id"], "textHash": rendered_text.text_hash, "text": rendered_text.text}
+        )
+    return rendered
+
+
+def _load_summary_snapshot(
+    db_path: Path,
+    graph_id: str,
+    embedding_config: dict[str, Any],
+    summarize_run_id: str | None,
+    *,
+    include_junk: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if summarize_run_id is None:
+        raise RuntimeError("summary representation requires summarizeRunId")
+    with connect(db_path) as conn:
+        summarize_run = fetch_all(
+            conn,
+            """
+            SELECT *
+              FROM runs
+             WHERE id = ? AND graph_id = ? AND type = 'summarize' AND status = 'succeeded'
+            """,
+            (summarize_run_id, graph_id),
+        )
+        if not summarize_run:
+            raise RuntimeError("summarizeRunId must reference a succeeded summarize run")
+        stats = json.loads(summarize_run[0]["stats_json"])
+        params = json.loads(summarize_run[0]["params_json"])
+        rows = fetch_all(
+            conn,
+            """
+            SELECT r.id, r.normalized_json, rs.rendered_text, rs.junk_type
+              FROM records r
+              LEFT JOIN summary_items si
+                ON si.run_id = ? AND si.record_id = r.id
+              LEFT JOIN record_summaries rs
+                ON rs.model = ?
+               AND rs.prompt_hash = ?
+               AND rs.text_hash = si.text_hash
+             WHERE r.graph_id = ?
+             ORDER BY r.timestamp_ms ASC, r.id ASC
+            """,
+            (
+                summarize_run_id,
+                params["summarization"]["model"],
+                stats["promptHash"],
+                graph_id,
+            ),
+        )
+    rendered = []
+    missing = 0
+    skipped_junk = 0
+    for row in rows:
+        if row["rendered_text"] is None:
+            missing += 1
+            continue
+        if not include_junk and row["junk_type"] != "none":
+            skipped_junk += 1
+            continue
+        text = row["rendered_text"]
+        rendered.append(
+            {
+                "id": row["id"],
+                "textHash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "text": text,
+            }
+        )
+    return rendered, {
+        "representation": "summary",
+        "includeJunk": include_junk,
+        "summarizeRunId": summarize_run_id,
+        "missingSummaries": missing,
+        "skippedJunk": skipped_junk,
+        "sourceRecords": len(rows),
+    }
 
 
 def _insert_embedding_items(
