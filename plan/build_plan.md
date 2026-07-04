@@ -691,6 +691,36 @@ in a usable state.
 
 ## Amendments
 
+**2026-07-04 (e)** (pilot round 3 — concat rerun + Phase 11 real-data
+acceptance). The agent re-extracted with chronologically concatenated
+customer-authored messages (its own round-1 finding) and the round-2
+mega-topic dissolved AT THE INPUT LAYER: "Order status and support
+requests" (1,145, 45%) became "Warm or spoiled deliveries" (826) +
+"Delivery issues and address changes" (526) + concrete operational themes.
+Core lesson: EMBEDDING-TEXT QUALITY DOMINATES TOPIC QUALITY — thin
+first-message/preview text produces vague mega-topics no clustering
+parameter can fix; the boundary held again (the fix was entirely
+agent-side). Token profile: max 2,569 / p95 960 / zero at the 8k cap.
+Noise rose 0.59% → 6.42% with richer texts (expected, more honest).
+Phase 11 acceptance on real data: focus reclustering PASSED — cluster 1's
+default focus split produced six genuinely routeable children (spoiled
+meals / address changes / cancel delivery / missing deliveries), focus
+runs took 0.7–1.2s, and focus doubled as a JUNK DETECTOR (a 120-record
+sales-pitch pocket hiding inside the largest topic); leaf-inside-focus
+over-fragments (~50% to noise) — eom default is the right operator view.
+facetBy: feature correct, usefulness gated by metadata population —
+channel facets excellent; product/SKU dominated by "(none)"/"(other)";
+primaryTag is VIP/LTV not issue taxonomy. Agent guidance: map issue-
+taxonomy fields into metadata at extraction time. New filter lesson:
+junk rules are REPRESENTATION-DEPENDENT — single-message rules over-fire
+on concatenated threads (footers, quoted text, customer travel context);
+filter at message level before concatenation. Phase 10 verified on the
+pilot machine (gzip + ETag + 304). Backlog from round 3: HEAD support on
+read endpoints (artifact returns 405 to curl -I / uptime checks); README
+facet-metadata guidance; agent-side: next OOO rule + wellness-flavored
+sales-pitch rule (playbook updated). Prior backlog still open: embedding
+matrix load optimization (94s of the 100k cluster run).
+
 **2026-07-04 (d)** (pilot round 2 + Phase 10 + topics research). Round 2
 (filtered re-run, same Sakara data): junk share 41% → 2.7%, 12 topics /
 0.59% noise, surprising_topics 5/5 genuine, coherent:false 0 fires (as
