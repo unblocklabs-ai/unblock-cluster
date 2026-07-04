@@ -22,6 +22,7 @@ def execute_cluster_job(
     embedding_run_id: str,
     cluster_config: dict[str, Any],
     set_default: bool = True,
+    focus: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     phase_started = _start_phase(db_path, run_id, "loading")
@@ -29,7 +30,7 @@ def execute_cluster_job(
     embedding_run = _load_embedding_run(db_path, graph_id, embedding_run_id)
     model = embedding_run["stats"]["model"]
     dimensions = int(embedding_run["stats"]["dimensions"])
-    scoped_records = _load_scoped_records(db_path, graph_id, view_id)
+    scoped_records = _load_scoped_records(db_path, graph_id, view_id, focus=focus)
     scoped_ids = [record["id"] for record in scoped_records]
     vector_record_ids, matrix = load_vectors_for_records(
         db_path,
@@ -109,6 +110,7 @@ def execute_cluster_job(
             "embeddingRunId": embedding_run_id,
             "cluster": cluster_config,
             "setDefault": set_default,
+            **({"focus": focus} if focus is not None else {}),
         },
         "phaseDurations": phase_durations,
         "durationSeconds": round(time.monotonic() - started, 6),
@@ -167,7 +169,13 @@ def _load_embedding_run(db_path: str, graph_id: str, embedding_run_id: str) -> d
     return row
 
 
-def _load_scoped_records(db_path: str, graph_id: str, view_id: str) -> list[dict]:
+def _load_scoped_records(
+    db_path: str,
+    graph_id: str,
+    view_id: str,
+    *,
+    focus: dict[str, Any] | None = None,
+) -> list[dict]:
     with connect(db_path) as conn:
         view = fetch_one(
             conn,
@@ -177,7 +185,7 @@ def _load_scoped_records(db_path: str, graph_id: str, view_id: str) -> list[dict
         if view is None:
             raise RuntimeError("view not found")
         where, params = compile_scope(json.loads(view["scope_json"]), alias="r")
-        return fetch_all(
+        rows = fetch_all(
             conn,
             f"""
             SELECT *
@@ -187,6 +195,19 @@ def _load_scoped_records(db_path: str, graph_id: str, view_id: str) -> list[dict
             """,
             (graph_id, *params),
         )
+        if focus is None:
+            return rows
+        focus_rows = fetch_all(
+            conn,
+            """
+            SELECT record_id
+              FROM cluster_memberships
+             WHERE run_id = ? AND cluster_id = ?
+            """,
+            (focus["clusterRunId"], int(focus["clusterId"])),
+        )
+        focus_ids = {row["record_id"] for row in focus_rows}
+        return [row for row in rows if row["id"] in focus_ids]
 
 
 def _clustering_space(matrix: np.ndarray, config: dict[str, Any]) -> np.ndarray:
@@ -196,6 +217,7 @@ def _clustering_space(matrix: np.ndarray, config: dict[str, Any]) -> np.ndarray:
     reducer = umap.UMAP(
         n_components=int(config["space"]["nComponents"]),
         n_neighbors=max(n_neighbors, 2),
+        min_dist=float(config["space"]["minDist"]),
         metric=config["space"]["metric"],
         random_state=config.get("seed"),
     )

@@ -67,7 +67,9 @@ autoresponders. Exclude transactional sends and automated campaign records such
 as newsletters, tracking-pixel bodies, and URL-dominant bodies. Exclude
 vendor/PR outreach, records with zero customer-authored messages (use inbound
 message counts when the source provides them), and records with no meaningful
-free text such as score-only NPS rows.
+free text such as score-only NPS rows. Exclude device/platform relay
+notifications such as printer confirmations, marketplace payout notices, and
+chargeback status messages unless they include customer-authored substance.
 
 After upload, leftover junk is visible through service-side signals: junk-like
 topic labels, `coherent: false` labels, and records surfaced by
@@ -87,6 +89,54 @@ default `true`) on `cluster`, `layout`, `label`, and `trends`. Use
 repointing the view defaults. Promote a winner by rerunning it with
 `{"setDefault": true}` (or omitting the key). Clustering reruns reuse the
 existing embedding run, so promotion is cheap.
+
+### Decomposing A Large Topic
+
+If one topic swallows a large share of the graph after source filtering, use a
+focus cluster run to drill into that topic instead of promoting a global tuning
+run. Focus runs recluster only the selected topic's member records and are
+inspection-only; they never become the view default because the artifact and
+layout still cover the full view.
+
+```sh
+FOCUS_RUN_ID=$(
+  curl -sS -X POST "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/views/$VIEW_ID/cluster" \
+    -H 'Content-Type: application/json' \
+    -d '{"focus":{"clusterId":12}}' | jq -r .id
+)
+
+curl -sS -X POST "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/views/$VIEW_ID/label" \
+  -H 'Content-Type: application/json' \
+  -d '{"clusterRunId":"'$FOCUS_RUN_ID'","setDefault":false}'
+
+curl -sS "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/views/$VIEW_ID/topics?clusterRunId=$FOCUS_RUN_ID"
+curl -sS "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/views/$VIEW_ID/topics/0/records?clusterRunId=$FOCUS_RUN_ID"
+```
+
+For global granularity experiments, `cluster.hdbscan.clusterSelectionMethod:
+"leaf"` can split EOM's one-large-cluster signature, and
+`cluster.hdbscan.clusterSelectionEpsilon` can merge nearby leaf clusters back
+together. Run those with `setDefault:false` first, then promote only if the
+whole view improves. UMAP's clustering guide suggests `cluster.space.minDist:
+0.0` to pack points densely, but the real-embedding evaluation over-fragmented
+feedback topics (`ARI 0.860` at `0.1` to `0.697` at `0.0`), so the default
+stays `0.1`. Use `0.0` only as another per-run experiment with
+`setDefault:false`.
+
+Use facets to explain a large or surprising topic by record fields:
+
+```sh
+curl -sS "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/views/$VIEW_ID/topics?facetBy=metadata.groundTruthTopicId"
+
+curl -sS -X POST "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/evidence" \
+  -H 'Content-Type: application/json' \
+  -d '{"viewId":"'$VIEW_ID'","recipe":"topic_evidence","topicId":12,"facetBy":"sourceType"}'
+```
+
+Allowed `facetBy` values are `sourceType`, `sourceName`, `product`, `sku`,
+`sentiment`, `rating`, `tags`, and `metadata.<key>`. Null or absent values are
+bucketed as `"(none)"`; high-cardinality facets return the top 20 values plus
+`"(other)"`.
 
 Minimum pipeline:
 
@@ -157,7 +207,8 @@ memberships, labels, trend rows, or layout points; it simply leaves
 Inspection reads (all resolve the view's default runs, overridable by id):
 
 - `GET /api/graphs/:gid/views/:vid/topics` — labels, size, source mix, trend
-  snapshots, noise summary.
+  snapshots, noise summary; add `?facetBy=sourceType` or another allowed facet
+  for per-topic breakdowns.
 - `GET /api/graphs/:gid/views/:vid/topics/:tid/records` — stored
   representatives with text.
 - `GET /api/graphs/:gid/views/:vid/outliers` — highest outlier scores + noise.

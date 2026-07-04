@@ -20,6 +20,7 @@ DEFAULT_GRAPH_CONFIG: dict[str, Any] = {
             "nComponents": 25,
             "nNeighbors": 15,
             "metric": "cosine",
+            "minDist": 0.1,
         },
         "hdbscan": {
             "minClusterSize": None,
@@ -63,6 +64,18 @@ def validate_graph_config(config: Any, *, require_text_fields: bool = True) -> d
             {
                 "field": "config.cluster.space.method",
                 "message": 'must be "umap" or "none"',
+            }
+        )
+    min_dist = normalized["cluster"]["space"].get("minDist")
+    if (
+        not isinstance(min_dist, int | float)
+        or isinstance(min_dist, bool)
+        or float(min_dist) < 0
+    ):
+        errors.append(
+            {
+                "field": "config.cluster.space.minDist",
+                "message": "must be a number greater than or equal to 0",
             }
         )
 
