@@ -1,3 +1,5 @@
+const LIST_PAGE_SIZE = 500;
+
 export function parseViewParams(search = "") {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   return {
@@ -46,12 +48,14 @@ export function buildViewState(artifact, options = {}) {
     },
     selectedTopicId: normalizeNullableTopicId(options.selectedTopicId),
     selectedRecordId: normalizeRecordId(options.selectedRecordId),
+    listLimit: normalizeListLimit(options.listLimit),
   };
 }
 
 export function updateFilters(state, patch) {
   return {
     ...state,
+    listLimit: LIST_PAGE_SIZE,
     filters: {
       ...state.filters,
       ...patch,
@@ -67,10 +71,6 @@ export function selectTopic(state, topicId) {
     ...state,
     selectedTopicId: normalizedTopicId === "" ? null : normalizedTopicId,
     selectedRecordId: null,
-    filters: {
-      ...state.filters,
-      topicId: normalizedTopicId,
-    },
   };
 }
 
@@ -100,16 +100,31 @@ export function clearTopicSelection(state) {
     ...state,
     selectedTopicId: null,
     selectedRecordId: null,
-    filters: {
-      ...state.filters,
-      topicId: "",
-    },
   };
 }
 
 export function visibleRecords(state) {
   const records = state.artifact?.data || [];
   return records.filter((record) => recordMatchesFilters(record, state.filters));
+}
+
+export function listWindow(records, state) {
+  const total = records.length;
+  const limit = normalizeListLimit(state?.listLimit);
+  const showing = Math.min(total, limit);
+  return {
+    records: records.slice(0, showing),
+    showing,
+    total,
+    remaining: Math.max(0, total - showing),
+  };
+}
+
+export function showMoreListRecords(state, pageSize = LIST_PAGE_SIZE) {
+  return {
+    ...state,
+    listLimit: normalizeListLimit(state.listLimit) + pageSize,
+  };
 }
 
 function recordMatchesFilters(record, filters) {
@@ -192,4 +207,9 @@ function normalizeNullableTopicId(value) {
 function normalizeRecordId(value) {
   if (value === null || value === undefined || value === "") return null;
   return String(value);
+}
+
+function normalizeListLimit(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : LIST_PAGE_SIZE;
 }

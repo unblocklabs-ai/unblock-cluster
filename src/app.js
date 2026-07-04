@@ -14,10 +14,12 @@ import {
   buildViewState,
   clearTopicSelection,
   clusterColor,
+  listWindow,
   parseViewParams,
   representativeRecords,
   selectRecord,
   selectTopic,
+  showMoreListRecords,
   spikeBadge,
   topicLabel,
   updateFilters,
@@ -59,6 +61,12 @@ const runtime = {
   initialFitDone: false,
   recordDetails: new Map(),
   recordDetailRequests: new Set(),
+  styleCache: new Map(),
+  searchDraft: null,
+  searchTimer: null,
+  visibleRecords: [],
+  recordsSignature: "",
+  listSignature: "",
 };
 
 const LAYOUT_PROJECTION = new Projection({
@@ -107,7 +115,10 @@ async function loadArtifact(graphId, viewId, options = {}) {
   runtime.initialFitDone = false;
   runtime.recordDetails.clear();
   runtime.recordDetailRequests.clear();
-  render();
+  runtime.styleCache.clear();
+  runtime.recordsSignature = "";
+  runtime.listSignature = "";
+  render({ dataChanged: true });
 }
 
 async function renderPicker() {
@@ -145,39 +156,48 @@ async function renderPicker() {
 
 function bindEvents() {
   els.search?.addEventListener("input", () => {
-    runtime.state = updateFilters(runtime.state, { query: els.search.value });
-    render();
+    runtime.searchDraft = els.search.value;
+    if (runtime.searchTimer !== null) {
+      clearTimeout(runtime.searchTimer);
+    }
+    runtime.searchTimer = setTimeout(() => {
+      runtime.searchTimer = null;
+      runtime.state = updateFilters(runtime.state, { query: runtime.searchDraft || "" });
+      runtime.searchDraft = null;
+      render({ dataChanged: true });
+    }, 200);
   });
   els.sourceFilter?.addEventListener("change", () => {
     runtime.state = updateFilters(runtime.state, { sourceType: els.sourceFilter.value });
-    render();
+    render({ dataChanged: true });
   });
   els.topicFilter?.addEventListener("change", () => {
+    runtime.state = updateFilters(runtime.state, { topicId: els.topicFilter.value });
     runtime.state =
       els.topicFilter.value === ""
-        ? clearTopicSelection(updateFilters(runtime.state, { topicId: "" }))
+        ? clearTopicSelection(runtime.state)
         : selectTopic(runtime.state, els.topicFilter.value);
-    render();
+    render({ dataChanged: true });
   });
   els.startFilter?.addEventListener("change", () => {
     runtime.state = updateFilters(runtime.state, { start: els.startFilter.value });
-    render();
+    render({ dataChanged: true });
   });
   els.endFilter?.addEventListener("change", () => {
     runtime.state = updateFilters(runtime.state, { end: els.endFilter.value });
-    render();
+    render({ dataChanged: true });
   });
   els.mapModeButton?.addEventListener("click", () => {
     runtime.mode = "map";
-    render();
+    render({ modeChanged: true });
   });
   els.listModeButton?.addEventListener("click", () => {
     runtime.mode = "list";
-    render();
+    render({ modeChanged: true });
   });
   els.clearTopicButton?.addEventListener("click", () => {
     runtime.state = clearTopicSelection(runtime.state);
-    render();
+    render({ selectionOnly: true });
   });
   els.fitButton?.addEventListener("click", fitVisible);
   if (!runtime.resizeBound && typeof window !== "undefined") {
@@ -186,13 +206,17 @@ function bindEvents() {
   }
 }
 
-function render() {
+function render(options = {}) {
+  const { dataChanged = false, selectionOnly = false, listPageChanged = false } = options;
   const state = runtime.state;
   if (!state) return;
   els.picker.hidden = true;
   els.mapShell.hidden = runtime.mode !== "map";
   els.listShell.hidden = runtime.mode !== "list";
-  const records = visibleRecords(state);
+  const records = dataChanged ? visibleRecords(state) : runtime.visibleRecords;
+  if (dataChanged) {
+    runtime.visibleRecords = records;
+  }
   els.title.textContent = "Data Graph";
   els.subtitle.textContent = `${state.artifact.graphId} · ${state.artifact.viewId}`;
   els.stats.innerHTML = `
@@ -201,14 +225,26 @@ function render() {
     <span>${state.artifact.noise.noiseCount} noise</span>
   `;
   syncControls(state);
-  renderTopics(state, records);
+  if (selectionOnly) {
+    updateTopicSelectionClasses(state);
+  } else {
+    renderTopics(state, records);
+  }
   renderInspector(state, records);
-  renderList(state, records);
-  renderMap(state, records);
+  if (selectionOnly) {
+    updateListSelectionClasses(state);
+  } else if (dataChanged || listPageChanged || runtime.mode === "list") {
+    renderList(state, records);
+  }
+  if (selectionOnly) {
+    runtime.layer?.changed();
+  } else {
+    renderMap(state, records, { rebuildSource: dataChanged });
+  }
 }
 
 function syncControls(state) {
-  els.search.value = state.filters.query;
+  els.search.value = runtime.searchDraft ?? state.filters.query;
   els.startFilter.value = state.filters.start || state.timeExtent.min;
   els.endFilter.value = state.filters.end || state.timeExtent.max;
   els.startFilter.min = state.timeExtent.min;
@@ -260,7 +296,7 @@ function renderTopics(state, records) {
   els.topicPanel.querySelectorAll("[data-topic-id]").forEach((button) => {
     button.addEventListener("click", () => {
       runtime.state = selectTopic(runtime.state, button.dataset.topicId);
-      render();
+      render({ selectionOnly: true });
     });
   });
 }
@@ -364,16 +400,31 @@ function renderRecordInspector(state) {
     .querySelector("[data-back-to-topic]")
     ?.addEventListener("click", () => {
       runtime.state = backToTopic(runtime.state);
-      render();
+      render({ selectionOnly: true });
     });
 }
 
 function renderList(state, records) {
+  const windowed = listWindow(records, state);
+  const signature = `${records.map((record) => record.id).join("|")}::${windowed.showing}`;
+  if (signature === runtime.listSignature) {
+    updateListSelectionClasses(state);
+    return;
+  }
+  runtime.listSignature = signature;
   els.listContent.innerHTML = `
+    <div class="list-summary">
+      <span>Showing ${windowed.showing} of ${windowed.total}</span>
+      ${
+        windowed.remaining > 0
+          ? `<button type="button" data-show-more>Show ${Math.min(windowed.remaining, 500)} more</button>`
+          : ""
+      }
+    </div>
     <table>
       <thead><tr><th>Topic</th><th>Record</th><th>Source</th><th>Sentiment</th><th>Text</th></tr></thead>
       <tbody>
-        ${records
+        ${windowed.records
           .map((record) => {
             const topic = state.topicById.get(record.clusterId);
             return `
@@ -399,26 +450,43 @@ function renderList(state, records) {
       }
     });
   });
+  els.listContent.querySelector("[data-show-more]")?.addEventListener("click", () => {
+    runtime.state = showMoreListRecords(runtime.state);
+    render({ listPageChanged: true });
+  });
 }
 
-function renderMap(state, records) {
+function renderMap(state, records, options = {}) {
+  const { rebuildSource = false } = options;
   if (!runtime.map) {
     runtime.source = new VectorSource();
-    runtime.layer = new VectorLayer({ source: runtime.source });
+    runtime.layer = new VectorLayer({
+      source: runtime.source,
+      style: (feature) =>
+        pointStyle(
+          feature.get("record"),
+          runtime.state?.selectedTopicId,
+          runtime.state?.selectedRecordId,
+        ),
+    });
     runtime.map = new OlMap({
       target: els.mapCanvas,
       layers: [runtime.layer],
       view: new View({ center: [0, 0], resolution: 1, projection: LAYOUT_PROJECTION }),
     });
   }
-  runtime.source.clear();
-  for (const record of records) {
-    const feature = new Feature({
-      geometry: new Point([record.x, record.y]),
-      record,
-    });
-    feature.setStyle(pointStyle(record, state.selectedTopicId, state.selectedRecordId));
-    runtime.source.addFeature(feature);
+  const signature = records.map((record) => record.id).join("|");
+  if (rebuildSource || signature !== runtime.recordsSignature) {
+    runtime.recordsSignature = signature;
+    runtime.source.clear();
+    for (const record of records) {
+      runtime.source.addFeature(
+        new Feature({
+          geometry: new Point([record.x, record.y]),
+          record,
+        }),
+      );
+    }
   }
   if (!runtime.mapClickBound) {
     runtime.map.on("singleclick", (event) => {
@@ -477,14 +545,24 @@ function pointStyle(record, selectedTopicId, selectedRecordId) {
   const topicSelected =
     selectedTopicId === "" || selectedTopicId === null || record.clusterId === selectedTopicId;
   const recordSelected = record.id === selectedRecordId;
-  const radius = recordSelected
+  const radiusBucket = recordSelected
     ? 13
     : record.isNoise
       ? 4
-      : Math.max(5, Math.min(12, 5 + record.outlierScore * 5));
-  return new Style({
+      : Math.round(Math.max(5, Math.min(12, 5 + record.outlierScore * 5)) * 2) / 2;
+  const key = [
+    record.clusterId,
+    record.isNoise ? "noise" : "member",
+    lowProbability ? "low" : "high",
+    topicSelected ? "active" : "muted",
+    recordSelected ? "selected" : "normal",
+    radiusBucket,
+  ].join(":");
+  const cached = runtime.styleCache.get(key);
+  if (cached) return cached;
+  const style = new Style({
     image: new CircleStyle({
-      radius,
+      radius: radiusBucket,
       fill: new Fill({
         color: record.isNoise
           ? "rgba(120, 120, 120, 0.35)"
@@ -496,6 +574,8 @@ function pointStyle(record, selectedTopicId, selectedRecordId) {
       }),
     }),
   });
+  runtime.styleCache.set(key, style);
+  return style;
 }
 
 function fitVisible() {
@@ -543,7 +623,7 @@ function hideWorkspace() {
 
 function selectRecordAndRender(recordId) {
   runtime.state = selectRecord(runtime.state, recordId);
-  render();
+  render({ selectionOnly: true });
 }
 
 async function ensureRecordDetail(recordId) {
@@ -578,9 +658,24 @@ async function ensureRecordDetail(recordId) {
   } finally {
     runtime.recordDetailRequests.delete(recordId);
     if (runtime.state?.selectedRecordId === recordId) {
-      render();
+      render({ selectionOnly: true });
     }
   }
+}
+
+function updateTopicSelectionClasses(state) {
+  els.topicPanel.querySelectorAll("[data-topic-id]").forEach((button) => {
+    button.classList.toggle(
+      "selected",
+      Number(button.dataset.topicId) === state.selectedTopicId,
+    );
+  });
+}
+
+function updateListSelectionClasses(state) {
+  els.listContent.querySelectorAll("[data-record-id]").forEach((row) => {
+    row.classList.toggle("selected", row.dataset.recordId === state.selectedRecordId);
+  });
 }
 
 function renderError(title, message) {

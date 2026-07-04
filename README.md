@@ -215,6 +215,11 @@ representative record ids, and an optional trend snapshot. Record entries
 include truncated `customerText`, source fields, timestamp, x/y coordinates,
 cluster probability, outlier score, and noise status.
 
+Artifact responses are served with gzip when the client advertises it and use
+`Cache-Control: no-cache` plus a strong ETag. Repeating the same request with
+`If-None-Match` returns `304` until the resolved run refs or view records
+change. Response floats are rounded to 4 decimal places for transport only.
+
 `warnings` is always present on artifact and topics responses. It is empty for
 a healthy view. It names the label endpoint when the resolved cluster run has
 no labels, and it calls out label/trend default mismatches when a view points
@@ -231,9 +236,15 @@ The frontend supports:
   coherence flags, and spike badges.
 - Topic selection: highlights/filter points and shows stored representatives.
 - Time filter: client-side date range over record timestamps.
-- List mode: searchable/filterable record table with topic and source filters.
+- List mode: searchable/filterable record table with topic and source filters,
+  initially capped at 500 rows with explicit show-more pagination.
 - Picker: when no `graphId`/`viewId` query params are present, the app lists
   available graph views.
+
+Record list endpoints omit the bulky `normalized` object by default:
+`GET /api/graphs/:gid/records?include=normalized` and
+`GET /api/graphs/:gid/views/:vid/records?include=normalized` restore it.
+Single-record reads still include `normalized`.
 
 409 artifact errors are rendered as actionable messages instead of a blank map.
 
