@@ -689,7 +689,36 @@ in a usable state.
 
 ---
 
+## Backlog
+
+Ordered; top item is the next phase candidate.
+
+1. **Summarization runs (Phase 14 — decided 2026-07-04).** Optional
+   service-side summarize-then-embed: per-record `gpt-5.4-nano` structured
+   extraction with a service-owned strict schema (issue, product,
+   desiredResolution, sentiment, verbatim keyCustomerPhrases, junkType
+   gate), an optional agent-supplied `context` string (static brand/service
+   background injected into the summarizer prompt — better spam judgment;
+   part of the prompt hash), content-addressed summaries
+   (model, promptHash, textHash), `representation: "raw"|"summary"` on
+   embedding runs (A/B = two runs on one graph), junk gating at the embed
+   boundary, `summary.<key>` facets, receipts stay raw customer text.
+   Solves round 3's leftovers: semantic junk filtering (regex whack-a-mole
+   retired), facet starvation, length variance. Acceptance: Sakara A/B vs
+   the concat graph, watching for homogenization (suspiciously merged
+   topics).
+2. Embedding-matrix load optimization (94s of the 100k cluster run).
+3. Demand-gated: post-hoc topic merging; event annotations; second-brand
+   portability test of the playbook/recipe split.
+
 ## Amendments
+
+**2026-07-04 (f)** (Phase 13). Extraction-quality guidance from the pilots
+is now standing README agent contract (representation dominates, message-
+level filtering, facet-worthy metadata, history backfill, diagnostic table,
+iteration practices); HEAD supported on all routes via app-level
+HEAD-as-GET middleware (tunnel health checks). Summarization-runs decision
+recorded in the new Backlog section above.
 
 **2026-07-04 (e)** (pilot round 3 — concat rerun + Phase 11 real-data
 acceptance). The agent re-extracted with chronologically concatenated
