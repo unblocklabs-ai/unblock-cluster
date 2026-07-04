@@ -198,6 +198,21 @@ def test_summarize_then_embed_flow_reuse_facets_ab_and_receipts(tmp_path: Path) 
         assert cluster_run["stats"]["population"] == len(records) - 3
         assert cluster_run["inputRefs"]["embeddingRunId"] == summary_embed_id
 
+        layout_run_id = client.post(
+            f"/api/graphs/{graph_id}/views/{view_id}/layout",
+            json={"embeddingRunId": summary_embed_id},
+        ).json()["id"]
+        layout_run = _poll_run(client, graph_id, layout_run_id, timeout=180)
+        assert layout_run["status"] == "succeeded", layout_run
+        artifact = client.get(f"/api/graphs/{graph_id}/views/{view_id}/artifact")
+        assert artifact.status_code == 200, artifact.text
+        artifact_body = artifact.json()
+        assert artifact_body["representation"] == "summary"
+        assert artifact_body["runRefs"]["embeddingRunId"] == summary_embed_id
+        assert artifact_body["runRefs"]["clusterRunId"] == cluster_run_id
+        assert artifact_body["runRefs"]["layoutRunId"] == layout_run_id
+        assert artifact_body["runRefs"]["summarizeRunId"] == prompt_run_id
+
         raw_embed_id = client.post(f"/api/graphs/{graph_id}/embeddings", json={}).json()["id"]
         raw_embed = _poll_run(client, graph_id, raw_embed_id, timeout=120)
         assert raw_embed["status"] == "succeeded", raw_embed

@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Data Graph</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./src/styles.css" />
   </head>
   <body>
@@ -34,12 +35,38 @@
             <span>End</span>
             <input id="endDate" type="date" />
           </label>
+          <div class="date-presets" role="group" aria-label="Date range presets">
+            <button type="button" data-date-preset="7d" aria-label="Show last 7 days">7d</button>
+            <button type="button" data-date-preset="30d" aria-label="Show last 30 days">30d</button>
+            <button type="button" data-date-preset="90d" aria-label="Show last 90 days">90d</button>
+            <button type="button" data-date-preset="all" aria-label="Show all dates">All</button>
+          </div>
         </div>
         <div class="stats" id="stats"></div>
       </header>
 
-      <main class="workspace">
-        <aside class="topic-panel" id="topicPanel" aria-label="Topics"></aside>
+      <section class="warnings-banner" id="warningsBanner" hidden></section>
+      <section class="picker" id="picker" hidden></section>
+
+      <main class="workspace" id="workspace">
+        <aside class="topic-panel" id="topicPanel" aria-label="Topics">
+          <div class="topic-panel-controls">
+            <label>
+              <span>Topic search</span>
+              <input id="topicSearch" type="search" autocomplete="off" aria-label="Search topics" />
+            </label>
+            <label>
+              <span>Sort</span>
+              <select id="topicSort" aria-label="Sort topics">
+                <option value="size">Size</option>
+                <option value="spike">Spike</option>
+                <option value="name">Name</option>
+              </select>
+            </label>
+          </div>
+          <div id="topicList"></div>
+          <footer class="provenance" id="provenance"></footer>
+        </aside>
 
         <section class="stage">
           <div class="modebar">
@@ -60,7 +87,6 @@
           <section class="list-shell" id="listShell" aria-label="Record list" hidden>
             <div id="listContent"></div>
           </section>
-          <section class="picker" id="picker" hidden></section>
         </section>
 
         <aside class="inspector" aria-label="Topic evidence">

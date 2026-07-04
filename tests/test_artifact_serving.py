@@ -95,6 +95,8 @@ def test_artifact_gzip_etag_cache_float_precision_and_records_slimming(
             "labelRunId": label_run_id,
             "trendRunId": trend_run_id,
         }
+        assert artifact["representation"] == "raw"
+        assert "summarizeRunId" not in artifact["runRefs"]
         _assert_artifact_float_precision(artifact)
         assert client.app.state.artifact_compositions == 1
 
