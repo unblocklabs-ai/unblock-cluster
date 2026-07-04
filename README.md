@@ -63,6 +63,14 @@ Read-only mode is for sharing a finished graph without letting users mutate it.
 GETs, static assets, and `POST /api/graphs/:gid/evidence` remain available; all
 other `POST`, `PATCH`, `PUT`, and `DELETE` endpoints return `403`.
 
+Tunnel and uptime checks can use `HEAD` on read endpoints without downloading
+the response body:
+
+```sh
+curl -I "http://127.0.0.1:8080/api/health"
+curl -I "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/views/$VIEW_ID/artifact"
+```
+
 ## Agent Contract
 
 Agents upload already-normalized, redacted records, run the pipeline, and then
@@ -85,6 +93,53 @@ After upload, leftover junk is visible through service-side signals: junk-like
 topic labels, `coherent: false` labels, and records surfaced by
 `GET /api/graphs/:gid/views/:vid/outliers`. Treat those as feedback for the
 next extract, not as a reason to tune clustering around bad input.
+
+### Extraction Quality: What The Input Does To The Output
+
+Representation dominates topic quality. In the pilot, first-message/preview
+text produced a generic mega-topic: 1,145 records, 45% of the graph, labeled
+"Order status and support requests". Re-extracting the same conversations as
+one record per conversation, with `customerText` set to the chronological
+concatenation of customer-authored messages and agent replies excluded,
+dissolved that blob into concrete operational themes such as 826 warm or
+spoiled deliveries and 526 delivery/address-change records. The real threads
+were still comfortably below the embedding cap: max about 2.6k tokens, p95
+about 1k, and zero at the 8k limit.
+
+Filter at message level before concatenation. Junk rules are representation-
+dependent: single-message patterns over-fire on concatenated threads. Quoted
+footers, tracking links inside an otherwise real thread, and a customer
+mentioning travel are not OOO records. Redact URLs, emails, and phone numbers
+inside kept messages instead of dropping the whole record.
+
+Changing representation changes every rendered embedding text, so it requires
+a full re-embed. Content-addressed vector reuse cannot help when every text is
+new. The cost is cheap in absolute terms for local pilot sizes, but plan for
+the rerun.
+
+Make metadata facet-worthy at extraction time. Facet usefulness is gated by
+population: the pilot's channel facets were excellent, while product was 100%
+`"(none)"` and order SKUs were unused. Map SKUs to product families, and
+surface issue-taxonomy fields plus boolean flags such as `hasRefund` in
+`metadata` so `facetBy=metadata.<key>` answers operator questions.
+
+Backfill enough history during onboarding. Trend baselines need runway; with
+only about one month of data, new/vanishing topic evidence is structurally
+empty. Prefer 6-12 months when the source system can provide it.
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Largest topic is more than about 30% of the graph with a generic label | Representation is too thin, or the topic needs a drilldown | Re-extract richer `customerText`, or run focus reclustering on that topic |
+| Coherent junk topics | Filtering gap | Mine representatives for the next source-filter rule |
+| `coherent:false` topics | No-signal records such as score-only rows | Drop or enrich those records before upload |
+| Many near-duplicate labels | Over-split clustering | Raise `minClusterSize` and trial with `setDefault:false` |
+| Higher noise after enriching text | Expected and honest separation, not a defect; pilot noise rose 0.6% to 6.4% | Inspect outliers, but do not tune away truthful no-fit records |
+
+Use representation A/B tests when quality is uncertain: create two graphs from
+the same conversations and compare outputs. Embeddings are the only meaningful
+cost. Keep a per-brand list of canonical questions and rerun it after
+extraction changes. Use focus reclustering inside large topics as both a
+drilldown tool and a junk detector.
 
 ### Iterating On Quality
 

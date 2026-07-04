@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -66,6 +66,17 @@ def create_app(
 
     app = FastAPI(title="Data Graph", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    @app.middleware("http")
+    async def head_as_get(request: Request, call_next: Callable) -> Response:
+        if request.method != "HEAD":
+            return await call_next(request)
+
+        request.scope["method"] = "GET"
+        response = await call_next(request)
+        async for _ in response.body_iterator:
+            pass
+        return Response(status_code=response.status_code, headers=dict(response.headers))
 
     @app.middleware("http")
     async def read_only_guard(request: Request, call_next: Callable) -> JSONResponse:
