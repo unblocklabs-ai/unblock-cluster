@@ -3,17 +3,24 @@ import test from "node:test";
 
 import {
   backToTopic,
+  applyDatePreset,
   buildViewState,
   clearTopicSelection,
+  datePresetFilters,
   listWindow,
   parseViewParams,
   representativeRecords,
   selectRecord,
   selectTopic,
+  selectedTopicExtentRecords,
   showMoreListRecords,
   spikeBadge,
+  topicPanelTopics,
+  trendSparklinePath,
   updateFilters,
+  updateTopicPanel,
   visibleRecords,
+  viewSearchParams,
 } from "../src/uiState.js";
 
 const artifact = {
@@ -78,14 +85,16 @@ test("parses graph and view query parameters", () => {
     viewId: "view_1",
     mode: null,
     topicId: null,
+    recordId: null,
   });
   assert.deepEqual(
-    parseViewParams("?graphId=grf_1&viewId=view_1&mode=list&topicId=2"),
+    parseViewParams("?graphId=grf_1&viewId=view_1&mode=list&topicId=2&recordId=r2"),
     {
       graphId: "grf_1",
       viewId: "view_1",
       mode: "list",
       topicId: "2",
+      recordId: "r2",
     },
   );
   assert.deepEqual(parseViewParams(""), {
@@ -93,6 +102,25 @@ test("parses graph and view query parameters", () => {
     viewId: null,
     mode: null,
     topicId: null,
+    recordId: null,
+  });
+});
+
+test("round-trips URL parameters including record selection", () => {
+  let state = buildViewState(artifact, { selectedTopicId: 1 });
+  assert.equal(
+    viewSearchParams(state, "map"),
+    "?graphId=grf_1&viewId=view_1&topicId=1",
+  );
+
+  state = selectRecord(state, "r2");
+  const query = viewSearchParams(state, "list");
+  assert.deepEqual(parseViewParams(query), {
+    graphId: "grf_1",
+    viewId: "view_1",
+    mode: "list",
+    topicId: "1",
+    recordId: "r2",
   });
 });
 
@@ -121,6 +149,50 @@ test("filters records by time, topic, source, and search query", () => {
   assert.deepEqual(
     visibleRecords(state).map((record) => record.id),
     ["r1"],
+  );
+});
+
+test("keeps selection spatial while topic filter hard-scopes records", () => {
+  let state = selectTopic(buildViewState(artifact), 1);
+  assert.deepEqual(
+    visibleRecords(state).map((record) => record.id),
+    ["r1", "r2", "r3"],
+  );
+  assert.deepEqual(
+    selectedTopicExtentRecords(state).map((record) => record.id),
+    ["r1", "r2"],
+  );
+
+  state = updateFilters(state, { topicId: 1 });
+  assert.deepEqual(
+    visibleRecords(state).map((record) => record.id),
+    ["r1", "r2"],
+  );
+});
+
+test("sorts and searches topic panel topics", () => {
+  let state = buildViewState(artifact);
+  assert.deepEqual(
+    topicPanelTopics(state).map((entry) => entry.topic.clusterId),
+    [1, 2],
+  );
+
+  state = updateTopicPanel(state, { topicSort: "name" });
+  assert.deepEqual(
+    topicPanelTopics(state).map((entry) => entry.topic.label),
+    ["December spike", "Small"],
+  );
+
+  state = updateTopicPanel(state, { topicSort: "spike" });
+  assert.deepEqual(
+    topicPanelTopics(state).map((entry) => entry.topic.clusterId),
+    [1, 2],
+  );
+
+  state = updateTopicPanel(state, { topicSearch: "small" });
+  assert.deepEqual(
+    topicPanelTopics(state).map((entry) => entry.topic.clusterId),
+    [2],
   );
 });
 
@@ -223,4 +295,43 @@ test("resolves representatives and trend spike badge", () => {
     score: 6.5,
   });
   assert.equal(spikeBadge(state.topicById.get(2)), null);
+});
+
+test("builds sparkline paths for empty, single, flat, and spike series", () => {
+  assert.equal(trendSparklinePath([]), "");
+  assert.equal(trendSparklinePath([{ count: 4 }], { width: 10, height: 6, padding: 1 }), "M 1 3 L 9 3");
+  assert.equal(
+    trendSparklinePath(
+      [{ count: 3 }, { count: 3 }, { count: 3 }],
+      { width: 10, height: 6, padding: 1 },
+    ),
+    "M 1 3 L 5 3 L 9 3",
+  );
+  assert.equal(
+    trendSparklinePath(
+      [{ count: 1 }, { count: 9 }, { count: 2 }],
+      { width: 10, height: 6, padding: 1 },
+    ),
+    "M 1 5 L 5 1 L 9 4.5",
+  );
+});
+
+test("applies date presets against the artifact time extent", () => {
+  const state = buildViewState(artifact);
+  assert.deepEqual(datePresetFilters(state.timeExtent, "7d"), {
+    start: "2025-12-14",
+    end: "2025-12-20",
+  });
+  assert.deepEqual(datePresetFilters(state.timeExtent, "90d"), {
+    start: "2025-09-22",
+    end: "2025-12-20",
+  });
+  assert.deepEqual(datePresetFilters(state.timeExtent, "all"), { start: "", end: "" });
+
+  const filtered = applyDatePreset(state, "30d");
+  assert.deepEqual(filtered.filters, {
+    ...state.filters,
+    start: "2025-11-21",
+    end: "2025-12-20",
+  });
 });

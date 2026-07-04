@@ -100,6 +100,8 @@ def _compose_artifact(conn: Any, context: dict[str, Any]) -> dict[str, Any]:
     layout_run_id = layout_run["id"]
     cluster_refs = json.loads(cluster_run["input_refs_json"])
     layout_refs = json.loads(layout_run["input_refs_json"])
+    embedding_run_id = cluster_refs.get("embeddingRunId") or layout_refs.get("embeddingRunId")
+    representation = _embedding_representation(conn, embedding_run_id)
     labels = _latest_labels_by_cluster(conn, cluster_run_id)
     trend_snapshots, trend_run_id = _trend_snapshots(conn, graph_id, view_id, cluster_run_id)
     warnings = resolved_run_warnings(
@@ -116,10 +118,12 @@ def _compose_artifact(conn: Any, context: dict[str, Any]) -> dict[str, Any]:
     graph_config = load_graph_config(graph)
     embedding_config = graph_config.get("embedding", {})
     run_refs = {
-        "embeddingRunId": cluster_refs.get("embeddingRunId") or layout_refs.get("embeddingRunId"),
+        "embeddingRunId": embedding_run_id,
         "clusterRunId": cluster_run_id,
         "layoutRunId": layout_run_id,
     }
+    if representation["summarizeRunId"] is not None:
+        run_refs["summarizeRunId"] = representation["summarizeRunId"]
     if label_run_id is not None:
         run_refs["labelRunId"] = label_run_id
     if trend_run_id is not None:
@@ -134,6 +138,7 @@ def _compose_artifact(conn: Any, context: dict[str, Any]) -> dict[str, Any]:
             }
         },
         "runRefs": run_refs,
+        "representation": representation["representation"],
         "warnings": warnings,
         "layout": {
             "method": layout_params.get("method", "umap"),
@@ -211,6 +216,27 @@ def _artifact_etag(context: dict[str, Any]) -> str:
     }
     digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode("utf-8")).hexdigest()
     return f'"artifact-{digest}"'
+
+
+def _embedding_representation(conn: Any, embedding_run_id: str | None) -> dict[str, Any]:
+    if embedding_run_id is None:
+        return {"representation": "raw", "summarizeRunId": None}
+    row = fetch_one(
+        conn,
+        "SELECT params_json, input_refs_json FROM runs WHERE id = ? AND type = 'embed'",
+        (embedding_run_id,),
+    )
+    if row is None:
+        return {"representation": "raw", "summarizeRunId": None}
+    params = json.loads(row["params_json"])
+    refs = json.loads(row["input_refs_json"])
+    representation = params.get("representation", "raw")
+    if representation != "summary":
+        return {"representation": "raw", "summarizeRunId": None}
+    return {
+        "representation": "summary",
+        "summarizeRunId": params.get("summarizeRunId") or refs.get("summarizeRunId"),
+    }
 
 
 def _artifact_cache(request: Request) -> OrderedDict[str, dict[str, Any]]:

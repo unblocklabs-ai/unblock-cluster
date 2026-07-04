@@ -10,6 +10,7 @@ import VectorSource from "ol/source/Vector";
 import { Circle as CircleStyle, Fill, Stroke, Style } from "ol/style";
 import { boundingExtent } from "ol/extent";
 import {
+  applyDatePreset,
   backToTopic,
   buildViewState,
   clearTopicSelection,
@@ -19,26 +20,38 @@ import {
   representativeRecords,
   selectRecord,
   selectTopic,
+  selectedTopicExtentRecords,
   showMoreListRecords,
   spikeBadge,
+  topicPanelTopics,
   topicLabel,
+  trendSparklinePath,
   updateFilters,
+  updateTopicPanel,
   visibleRecords,
+  viewSearchParams,
 } from "./uiState.js";
 
 const els = {
   title: document.querySelector("#viewTitle"),
   subtitle: document.querySelector("#viewSubtitle"),
+  toolbar: document.querySelector(".toolbar"),
   search: document.querySelector("#recordSearch"),
   sourceFilter: document.querySelector("#sourceTypeFilter"),
   topicFilter: document.querySelector("#topicFilter"),
+  topicSearch: document.querySelector("#topicSearch"),
+  topicSort: document.querySelector("#topicSort"),
   startFilter: document.querySelector("#startDate"),
   endFilter: document.querySelector("#endDate"),
+  workspace: document.querySelector("#workspace"),
+  warningsBanner: document.querySelector("#warningsBanner"),
   mapShell: document.querySelector("#mapShell"),
   mapCanvas: document.querySelector("#mapCanvas"),
   listShell: document.querySelector("#listShell"),
   listContent: document.querySelector("#listContent"),
   topicPanel: document.querySelector("#topicPanel"),
+  topicList: document.querySelector("#topicList"),
+  provenance: document.querySelector("#provenance"),
   details: document.querySelector("#details"),
   stats: document.querySelector("#stats"),
   emptyState: document.querySelector("#emptyState"),
@@ -67,6 +80,13 @@ const runtime = {
   visibleRecords: [],
   recordsSignature: "",
   listSignature: "",
+  trends: new Map(),
+  trendsStatus: "idle",
+  facetField: "",
+  facetStatus: "idle",
+  facetTopics: null,
+  facetError: "",
+  loadToken: null,
 };
 
 const LAYOUT_PROJECTION = new Projection({
@@ -92,11 +112,19 @@ async function start() {
   runtime.mode = params.mode === "list" ? "list" : "map";
   await loadArtifact(params.graphId, params.viewId, {
     selectedTopicId: params.topicId,
-    topicId: params.topicId,
+    selectedRecordId: params.recordId,
   });
 }
 
 async function loadArtifact(graphId, viewId, options = {}) {
+  const loadToken = Symbol("artifact-load");
+  runtime.loadToken = loadToken;
+  runtime.state = null;
+  renderLoading("Loading records...");
+  const recordCount = await fetchViewRecordCount(graphId, viewId);
+  if (runtime.loadToken === loadToken && recordCount !== null) {
+    renderLoading(`Loading ${recordCount} records...`);
+  }
   const response = await fetch(
     `/api/graphs/${encodeURIComponent(graphId)}/views/${encodeURIComponent(viewId)}/artifact`,
   );
@@ -108,17 +136,48 @@ async function loadArtifact(graphId, viewId, options = {}) {
     } catch {
       // Keep the status-based fallback.
     }
+    runtime.loadToken = null;
     renderError("Artifact unavailable", detail);
     return;
   }
-  runtime.state = buildViewState(await response.json(), options);
+  const artifact = await response.json();
+  renderLoading(`Loading ${artifact.data?.length ?? 0} records...`);
+  runtime.state = buildViewState(artifact, options);
+  if (options.selectedRecordId) {
+    runtime.state = selectRecord(runtime.state, options.selectedRecordId);
+  }
   runtime.initialFitDone = false;
   runtime.recordDetails.clear();
   runtime.recordDetailRequests.clear();
   runtime.styleCache.clear();
   runtime.recordsSignature = "";
   runtime.listSignature = "";
+  runtime.trends = new Map();
+  runtime.trendsStatus = "idle";
+  runtime.facetField = "";
+  runtime.facetStatus = "idle";
+  runtime.facetTopics = null;
+  runtime.facetError = "";
+  delete els.warningsBanner.dataset.dismissed;
   render({ dataChanged: true });
+  runtime.loadToken = null;
+  if (runtime.state.selectedTopicId !== null) {
+    scheduleMapUpdate();
+    requestAnimationFrame(() => fitSelectedTopic());
+  }
+  fetchTrendsOnce();
+}
+
+async function fetchViewRecordCount(graphId, viewId) {
+  try {
+    const response = await fetch(`/api/graphs/${encodeURIComponent(graphId)}`);
+    if (!response.ok) return null;
+    const graph = await response.json();
+    const view = (graph.views || []).find((item) => item.id === viewId);
+    return Number.isFinite(view?.recordCount) ? view.recordCount : graph.recordCount;
+  } catch {
+    return null;
+  }
 }
 
 async function renderPicker() {
@@ -134,24 +193,35 @@ async function renderPicker() {
       return detail.ok ? detail.json() : graph;
     }),
   );
-  els.title.textContent = "Open Data Graph";
+  els.title.textContent = "Data Graph";
   els.subtitle.textContent = "Choose a graph view to inspect.";
   hideWorkspace();
+  els.workspace.hidden = true;
+  els.warningsBanner.hidden = true;
+  els.toolbar.hidden = true;
   els.picker.hidden = false;
   els.picker.innerHTML = graphDetails
-    .map((graph) =>
-      (graph.views || [])
-        .map(
-          (view) => `
-            <a class="picker-row" href="/?graphId=${encodeURIComponent(graph.id)}&viewId=${encodeURIComponent(view.id)}">
-              <strong>${escapeHtml(graph.name)}</strong>
-              <span>${escapeHtml(view.name)} · ${view.recordCount} records</span>
-            </a>
-          `,
-        )
-        .join(""),
+    .map(
+      (graph) => `
+        <article class="picker-card">
+          <h2>${escapeHtml(graph.name)}</h2>
+          <p>${graph.recordCount ?? 0} records</p>
+          <div class="picker-views">
+            ${(graph.views || [])
+              .map(
+                (view) => `
+                  <a class="picker-row" href="/?graphId=${encodeURIComponent(graph.id)}&viewId=${encodeURIComponent(view.id)}">
+                    <strong>${escapeHtml(view.name)}</strong>
+                    <span>${escapeHtml(view.description || "No description")} · ${view.recordCount} records</span>
+                  </a>
+                `,
+              )
+              .join("")}
+          </div>
+        </article>
+      `,
     )
-    .join("") || `<p class="muted">No graphs found.</p>`;
+    .join("") || `<div class="empty-landing"><h2>No graphs yet</h2><p>Start with the README quickstart, then return here to choose a graph view.</p></div>`;
 }
 
 function bindEvents() {
@@ -173,11 +243,15 @@ function bindEvents() {
   });
   els.topicFilter?.addEventListener("change", () => {
     runtime.state = updateFilters(runtime.state, { topicId: els.topicFilter.value });
-    runtime.state =
-      els.topicFilter.value === ""
-        ? clearTopicSelection(runtime.state)
-        : selectTopic(runtime.state, els.topicFilter.value);
     render({ dataChanged: true });
+  });
+  els.topicSearch?.addEventListener("input", () => {
+    runtime.state = updateTopicPanel(runtime.state, { topicSearch: els.topicSearch.value });
+    renderTopics(runtime.state, runtime.visibleRecords);
+  });
+  els.topicSort?.addEventListener("change", () => {
+    runtime.state = updateTopicPanel(runtime.state, { topicSort: els.topicSort.value });
+    renderTopics(runtime.state, runtime.visibleRecords);
   });
   els.startFilter?.addEventListener("change", () => {
     runtime.state = updateFilters(runtime.state, { start: els.startFilter.value });
@@ -187,16 +261,25 @@ function bindEvents() {
     runtime.state = updateFilters(runtime.state, { end: els.endFilter.value });
     render({ dataChanged: true });
   });
+  document.querySelectorAll("[data-date-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      runtime.state = applyDatePreset(runtime.state, button.dataset.datePreset);
+      render({ dataChanged: true });
+    });
+  });
   els.mapModeButton?.addEventListener("click", () => {
     runtime.mode = "map";
+    updateUrl();
     render({ modeChanged: true });
   });
   els.listModeButton?.addEventListener("click", () => {
     runtime.mode = "list";
+    updateUrl();
     render({ modeChanged: true });
   });
   els.clearTopicButton?.addEventListener("click", () => {
     runtime.state = clearTopicSelection(runtime.state);
+    updateUrl();
     render({ selectionOnly: true });
   });
   els.fitButton?.addEventListener("click", fitVisible);
@@ -211,6 +294,8 @@ function render(options = {}) {
   const state = runtime.state;
   if (!state) return;
   els.picker.hidden = true;
+  els.toolbar.hidden = false;
+  els.workspace.hidden = false;
   els.mapShell.hidden = runtime.mode !== "map";
   els.listShell.hidden = runtime.mode !== "list";
   const records = dataChanged ? visibleRecords(state) : runtime.visibleRecords;
@@ -224,6 +309,8 @@ function render(options = {}) {
     <span>${state.topics.length} topics</span>
     <span>${state.artifact.noise.noiseCount} noise</span>
   `;
+  renderWarnings(state);
+  renderProvenance(state);
   syncControls(state);
   if (selectionOnly) {
     updateTopicSelectionClasses(state);
@@ -241,6 +328,7 @@ function render(options = {}) {
   } else {
     renderMap(state, records, { rebuildSource: dataChanged });
   }
+  updateUrl();
 }
 
 function syncControls(state) {
@@ -263,6 +351,8 @@ function syncControls(state) {
     .join("")}`;
   els.topicFilter.value =
     state.filters.topicId === "" ? "" : String(state.filters.topicId);
+  els.topicSearch.value = state.topicSearch;
+  els.topicSort.value = state.topicSort;
   els.mapModeButton.setAttribute("aria-pressed", String(runtime.mode === "map"));
   els.listModeButton.setAttribute("aria-pressed", String(runtime.mode === "list"));
   els.fitButton.hidden = runtime.mode !== "map";
@@ -273,17 +363,18 @@ function syncControls(state) {
 }
 
 function renderTopics(state, records) {
-  els.topicPanel.innerHTML = state.topics
-    .map((topic) => {
-      const selected = topic.clusterId === state.selectedTopicId;
-      const visibleCount = records.filter((record) => record.clusterId === topic.clusterId).length;
+  els.topicList.innerHTML = topicPanelTopics(state, records)
+    .map(({ topic, visibleCount, selected }) => {
       const badge = spikeBadge(topic);
+      const series = runtime.trends.get(topic.clusterId);
+      const sparkline = renderSparkline(series, "small");
       return `
         <button class="topic ${selected ? "selected" : ""}" type="button" data-topic-id="${topic.clusterId}">
           <span class="topic-swatch" style="background:${clusterColor(topic.clusterId)}"></span>
           <span class="topic-main">
             <strong>${escapeHtml(topicLabel(topic))}</strong>
             <small>${visibleCount}/${topic.size} visible · mean p ${formatNumber(topic.meanProbability)}</small>
+            ${sparkline}
             ${topic.summary ? `<span>${escapeHtml(topic.summary)}</span>` : ""}
             ${topic.coherent === false ? `<em>Low coherence</em>` : ""}
             ${badge ? `<mark>${escapeHtml(badge.text)}</mark>` : ""}
@@ -293,10 +384,12 @@ function renderTopics(state, records) {
       `;
     })
     .join("");
-  els.topicPanel.querySelectorAll("[data-topic-id]").forEach((button) => {
+  els.topicList.querySelectorAll("[data-topic-id]").forEach((button) => {
     button.addEventListener("click", () => {
       runtime.state = selectTopic(runtime.state, button.dataset.topicId);
+      updateUrl();
       render({ selectionOnly: true });
+      fitSelectedTopic();
     });
   });
 }
@@ -313,17 +406,21 @@ function renderInspector(state, records) {
     return;
   }
   const reps = representativeRecords(selectedTopic, state.artifact.data);
+  const selectedRecords = records.filter((record) => record.clusterId === selectedTopic.clusterId);
+  const series = runtime.trends.get(selectedTopic.clusterId);
   els.emptyState.hidden = true;
   els.details.hidden = false;
   els.details.innerHTML = `
     <h2>${escapeHtml(topicLabel(selectedTopic))}</h2>
+    ${renderSparkline(series, "large")}
     ${selectedTopic.summary ? `<p class="wrap-text">${escapeHtml(selectedTopic.summary)}</p>` : ""}
     <dl>
       <dt>Coherence</dt><dd>${selectedTopic.coherent === false ? "Low" : "Normal"}</dd>
-      <dt>Visible records</dt><dd>${records.filter((record) => record.clusterId === selectedTopic.clusterId).length}</dd>
+      <dt>Visible records</dt><dd>${selectedRecords.length}</dd>
       <dt>Total records</dt><dd>${selectedTopic.size}</dd>
       <dt>Source mix</dt><dd>${formatSourceMix(selectedTopic.sourceMix)}</dd>
     </dl>
+    ${renderFacetControls(state, selectedTopic)}
     <h3>Representatives</h3>
     <div class="representatives">
       ${reps
@@ -343,6 +440,14 @@ function renderInspector(state, records) {
   `;
   els.details.querySelectorAll("[data-record-id]").forEach((button) => {
     button.addEventListener("click", () => selectRecordAndRender(button.dataset.recordId));
+  });
+  els.details.querySelector("[data-facet-selector]")?.addEventListener("change", (event) => {
+    runtime.facetField = event.target.value;
+    runtime.facetStatus = runtime.facetField ? "loading" : "idle";
+    runtime.facetTopics = null;
+    runtime.facetError = "";
+    renderInspector(runtime.state, runtime.visibleRecords);
+    if (runtime.facetField) fetchFacets(runtime.facetField);
   });
 }
 
@@ -427,8 +532,12 @@ function renderList(state, records) {
         ${windowed.records
           .map((record) => {
             const topic = state.topicById.get(record.clusterId);
+            const topicSelected =
+              !state.selectedRecordId &&
+              state.selectedTopicId !== null &&
+              record.clusterId === state.selectedTopicId;
             return `
-              <tr class="${record.id === state.selectedRecordId ? "selected" : ""}" data-record-id="${escapeAttr(record.id)}" tabindex="0">
+              <tr class="${record.id === state.selectedRecordId ? "selected" : ""} ${topicSelected ? "topic-selected" : ""}" data-record-id="${escapeAttr(record.id)}" tabindex="0">
                 <td>${escapeHtml(topicLabel(topic))}</td>
                 <td>${escapeHtml(record.title || record.recordId)}</td>
                 <td>${escapeHtml(record.sourceType || "")}</td>
@@ -459,6 +568,7 @@ function renderList(state, records) {
 function renderMap(state, records, options = {}) {
   const { rebuildSource = false } = options;
   if (!runtime.map) {
+    els.mapCanvas.innerHTML = "";
     runtime.source = new VectorSource();
     runtime.layer = new VectorLayer({
       source: runtime.source,
@@ -558,11 +668,15 @@ function pointStyle(record, selectedTopicId, selectedRecordId) {
   const topicSelected =
     selectedTopicId === "" || selectedTopicId === null || record.clusterId === selectedTopicId;
   const recordSelected = record.id === selectedRecordId;
-  const radiusBucket = recordSelected
+  const baseRadius = recordSelected
     ? 13
     : record.isNoise
       ? 4
       : Math.round(Math.max(5, Math.min(12, 5 + record.outlierScore * 5)) * 2) / 2;
+  const radiusBucket =
+    !recordSelected && topicSelected && selectedTopicId !== null && selectedTopicId !== ""
+      ? Math.min(14, Math.round(baseRadius * 1.18 * 2) / 2)
+      : baseRadius;
   const key = [
     record.clusterId,
     record.isNoise ? "noise" : "member",
@@ -577,12 +691,14 @@ function pointStyle(record, selectedTopicId, selectedRecordId) {
     image: new CircleStyle({
       radius: radiusBucket,
       fill: new Fill({
-        color: record.isNoise
-          ? "rgba(120, 120, 120, 0.35)"
-          : `${clusterColor(record.clusterId)}${lowProbability || !topicSelected ? "88" : "dd"}`,
+        color: !topicSelected
+          ? "rgba(148, 163, 184, 0.24)"
+          : record.isNoise
+            ? "rgba(120, 120, 120, 0.35)"
+            : `${clusterColor(record.clusterId)}${lowProbability ? "88" : "dd"}`,
       }),
       stroke: new Stroke({
-        color: recordSelected ? "#f8fafc" : record.isNoise ? "#4b5563" : topicSelected ? "#111827" : "#ffffff",
+        color: recordSelected ? "#f8fafc" : record.isNoise ? "#4b5563" : topicSelected ? "#111827" : "rgba(255,255,255,0.45)",
         width: recordSelected ? 4 : record.isNoise ? 2 : 1,
       }),
     }),
@@ -601,6 +717,18 @@ function fitVisible() {
     .map((feature) => feature.getGeometry().getCoordinates());
   runtime.map.getView().fit(boundingExtent(coordinates), {
     padding: [48, 48, 48, 48],
+    duration: 0,
+  });
+  return true;
+}
+
+function fitSelectedTopic() {
+  if (!runtime.map || runtime.mode !== "map" || !runtime.state) return false;
+  const selectedRecords = selectedTopicExtentRecords(runtime.state, runtime.visibleRecords);
+  if (!selectedRecords.length) return false;
+  runtime.map.updateSize();
+  runtime.map.getView().fit(boundingExtent(selectedRecords.map((record) => [record.x, record.y])), {
+    padding: [72, 72, 72, 72],
     duration: 0,
   });
   return true;
@@ -628,15 +756,212 @@ function nearestRecordAtCoordinate(coordinate) {
 }
 
 function hideWorkspace() {
+  els.workspace.hidden = true;
   els.mapShell.hidden = true;
   els.listShell.hidden = true;
-  els.topicPanel.innerHTML = "";
+  els.toolbar.hidden = true;
+  els.topicList.innerHTML = "";
+  els.provenance.innerHTML = "";
   els.stats.innerHTML = "";
 }
 
 function selectRecordAndRender(recordId) {
   runtime.state = selectRecord(runtime.state, recordId);
+  updateUrl();
   render({ selectionOnly: true });
+}
+
+function renderLoading(message) {
+  els.picker.hidden = true;
+  els.workspace.hidden = false;
+  els.warningsBanner.hidden = true;
+  els.mapShell.hidden = runtime.mode !== "map";
+  els.listShell.hidden = runtime.mode !== "list";
+  els.topicList.innerHTML = "";
+  els.provenance.innerHTML = "";
+  els.emptyState.hidden = true;
+  els.details.hidden = false;
+  els.details.innerHTML = `<div class="loading-state"><span class="spinner"></span><strong>${escapeHtml(message)}</strong></div>`;
+  if (runtime.mode === "list") {
+    els.listContent.innerHTML = `<div class="loading-state"><span class="spinner"></span><strong>${escapeHtml(message)}</strong></div>`;
+  } else {
+    els.mapCanvas.innerHTML = `<div class="loading-state"><span class="spinner"></span><strong>${escapeHtml(message)}</strong></div>`;
+  }
+}
+
+function renderWarnings(state) {
+  const warnings = state.artifact.warnings || [];
+  if (!warnings.length || els.warningsBanner.dataset.dismissed === "true") {
+    els.warningsBanner.hidden = true;
+    return;
+  }
+  els.warningsBanner.hidden = false;
+  els.warningsBanner.innerHTML = `
+    <div>
+      <strong>Artifact warnings</strong>
+      <ul>${warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>
+    </div>
+    <button type="button" aria-label="Dismiss warnings">Dismiss</button>
+  `;
+  els.warningsBanner.querySelector("button")?.addEventListener("click", () => {
+    els.warningsBanner.dataset.dismissed = "true";
+    els.warningsBanner.hidden = true;
+  });
+}
+
+function renderProvenance(state) {
+  const refs = state.artifact.runRefs || {};
+  const items = [
+    ["embed", refs.embeddingRunId],
+    ["cluster", refs.clusterRunId],
+    ["label", refs.labelRunId],
+    ["trend", refs.trendRunId],
+  ].filter(([, value]) => value);
+  els.provenance.innerHTML = `
+    <span>Runs</span>
+    ${items.map(([label, value]) => `<code>${label}:${shortRunId(value)}</code>`).join("")}
+    ${
+      state.artifact.representation === "summary"
+        ? `<span class="representation-pill">summary representation</span>${refs.summarizeRunId ? `<code>summary:${shortRunId(refs.summarizeRunId)}</code>` : ""}`
+        : `<span class="representation-pill">raw representation</span>`
+    }
+  `;
+}
+
+async function fetchTrendsOnce() {
+  if (!runtime.state || runtime.trendsStatus !== "idle") return;
+  runtime.trendsStatus = "loading";
+  const { graphId, viewId } = runtime.state.artifact;
+  try {
+    const response = await fetch(
+      `/api/graphs/${encodeURIComponent(graphId)}/views/${encodeURIComponent(viewId)}/trends`,
+    );
+    if (response.status === 409) {
+      runtime.trendsStatus = "none";
+      return;
+    }
+    if (!response.ok) throw new Error(`Trend request failed with ${response.status}`);
+    const body = await response.json();
+    runtime.trends = new Map(
+      (body.series || []).map((series) => [series.clusterId, series.buckets || []]),
+    );
+    runtime.trendsStatus = "loaded";
+    renderTopics(runtime.state, runtime.visibleRecords);
+    renderInspector(runtime.state, runtime.visibleRecords);
+  } catch {
+    runtime.trendsStatus = "error";
+  }
+}
+
+function renderSparkline(buckets, size) {
+  if (!buckets?.length) return "";
+  const width = size === "large" ? 220 : 96;
+  const height = size === "large" ? 52 : 24;
+  const path = trendSparklinePath(buckets, { width, height, padding: 3 });
+  if (!path) return "";
+  return `
+    <svg class="sparkline sparkline-${size}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Topic trend sparkline">
+      <path class="sparkline-fill" d="${escapeAttr(path)} L ${width - 3} ${height - 3} L 3 ${height - 3} Z"></path>
+      <path class="sparkline-line" d="${escapeAttr(path)}"></path>
+    </svg>
+  `;
+}
+
+function renderFacetControls(state, selectedTopic) {
+  const fields = [
+    ["sourceType", "Source type"],
+    ["sourceName", "Source name"],
+    ["product", "Product"],
+    ["sentiment", "Sentiment"],
+  ];
+  if (state.artifact.representation === "summary") {
+    fields.push(
+      ["summary.product", "Summary product"],
+      ["summary.issue", "Summary issue"],
+      ["summary.junkType", "Summary junk type"],
+    );
+  }
+  const selected = runtime.facetTopics?.find(
+    (topic) => topic.clusterId === selectedTopic.clusterId,
+  );
+  return `
+    <section class="facet-panel">
+      <label>
+        <span>Facet</span>
+        <select data-facet-selector aria-label="Facet topic records">
+          <option value="">Choose facet</option>
+          ${fields
+            .map(
+              ([value, label]) =>
+                `<option value="${escapeAttr(value)}" ${runtime.facetField === value ? "selected" : ""}>${escapeHtml(label)}</option>`,
+            )
+            .join("")}
+        </select>
+      </label>
+      ${facetBody(selected)}
+    </section>
+  `;
+}
+
+function facetBody(topic) {
+  if (!runtime.facetField) return `<p class="muted">Choose a facet to inspect this topic.</p>`;
+  if (runtime.facetStatus === "loading") return `<p class="muted">Loading facets...</p>`;
+  if (runtime.facetStatus === "error") {
+    return `<p class="muted">${escapeHtml(runtime.facetError || "Facet unavailable.")}</p>`;
+  }
+  const facets = Object.entries(topic?.facets || {}).map(([value, count]) => ({
+    value,
+    count,
+  }));
+  if (!facets.length) return `<p class="muted">No facet counts for this topic.</p>`;
+  const max = Math.max(...facets.map((facet) => facet.count));
+  return `
+    <div class="facet-bars">
+      ${facets
+        .map(
+          (facet) => `
+            <div class="facet-row">
+              <span>${escapeHtml(facet.value)}</span>
+              <div><i style="width:${Math.max(4, (facet.count / max) * 100)}%"></i></div>
+              <strong>${facet.count}</strong>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+async function fetchFacets(field) {
+  if (!runtime.state) return;
+  const { graphId, viewId } = runtime.state.artifact;
+  try {
+    const response = await fetch(
+      `/api/graphs/${encodeURIComponent(graphId)}/views/${encodeURIComponent(viewId)}/topics?facetBy=${encodeURIComponent(field)}`,
+    );
+    if (response.status === 422) {
+      runtime.facetStatus = "error";
+      runtime.facetError = "Summary facets need summary representation lineage.";
+      renderInspector(runtime.state, runtime.visibleRecords);
+      return;
+    }
+    if (!response.ok) throw new Error(`Facet request failed with ${response.status}`);
+    const body = await response.json();
+    runtime.facetTopics = body.topics || [];
+    runtime.facetStatus = "loaded";
+  } catch (error) {
+    runtime.facetStatus = "error";
+    runtime.facetError = error instanceof Error ? error.message : String(error);
+  }
+  renderInspector(runtime.state, runtime.visibleRecords);
+}
+
+function updateUrl() {
+  if (!runtime.state || typeof window === "undefined") return;
+  const next = viewSearchParams(runtime.state, runtime.mode);
+  if (window.location.search !== next) {
+    window.history.replaceState(null, "", next);
+  }
 }
 
 async function ensureRecordDetail(recordId) {
@@ -687,7 +1012,14 @@ function updateTopicSelectionClasses(state) {
 
 function updateListSelectionClasses(state) {
   els.listContent.querySelectorAll("[data-record-id]").forEach((row) => {
+    const record = state.recordById.get(row.dataset.recordId);
     row.classList.toggle("selected", row.dataset.recordId === state.selectedRecordId);
+    row.classList.toggle(
+      "topic-selected",
+      !state.selectedRecordId &&
+        state.selectedTopicId !== null &&
+        record?.clusterId === state.selectedTopicId,
+    );
   });
 }
 
@@ -707,6 +1039,10 @@ function formatSourceMix(sourceMix = {}) {
 
 function formatNumber(value) {
   return Number.isFinite(value) ? value.toFixed(2) : "n/a";
+}
+
+function shortRunId(value) {
+  return String(value ?? "").slice(-6);
 }
 
 function formatOptionalNumber(value) {

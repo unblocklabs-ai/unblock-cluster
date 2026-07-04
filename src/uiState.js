@@ -1,4 +1,5 @@
 const LIST_PAGE_SIZE = 500;
+const TOPIC_SORTS = new Set(["size", "spike", "name"]);
 
 export function parseViewParams(search = "") {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
@@ -7,7 +8,22 @@ export function parseViewParams(search = "") {
     viewId: params.get("viewId"),
     mode: params.get("mode"),
     topicId: params.get("topicId"),
+    recordId: params.get("recordId"),
   };
+}
+
+export function viewSearchParams(state, mode = "map") {
+  const params = new URLSearchParams();
+  if (state?.artifact?.graphId) params.set("graphId", state.artifact.graphId);
+  if (state?.artifact?.viewId) params.set("viewId", state.artifact.viewId);
+  if (mode === "list") params.set("mode", "list");
+  if (state?.selectedTopicId !== null && state?.selectedTopicId !== undefined) {
+    params.set("topicId", String(state.selectedTopicId));
+  }
+  if (state?.selectedRecordId) {
+    params.set("recordId", state.selectedRecordId);
+  }
+  return `?${params.toString()}`;
 }
 
 export function topicLabel(topic) {
@@ -49,6 +65,8 @@ export function buildViewState(artifact, options = {}) {
     selectedTopicId: normalizeNullableTopicId(options.selectedTopicId),
     selectedRecordId: normalizeRecordId(options.selectedRecordId),
     listLimit: normalizeListLimit(options.listLimit),
+    topicSort: normalizeTopicSort(options.topicSort),
+    topicSearch: normalizeSearch(options.topicSearch),
   };
 }
 
@@ -83,6 +101,43 @@ export function selectRecord(state, recordId) {
     selectedTopicId: record.clusterId,
     selectedRecordId: normalizedRecordId,
   };
+}
+
+export function updateTopicPanel(state, patch) {
+  return {
+    ...state,
+    topicSort:
+      "topicSort" in patch ? normalizeTopicSort(patch.topicSort) : state.topicSort,
+    topicSearch:
+      "topicSearch" in patch ? normalizeSearch(patch.topicSearch) : state.topicSearch,
+  };
+}
+
+export function topicPanelTopics(state, records = visibleRecords(state)) {
+  const visibleCounts = new Map();
+  for (const record of records) {
+    visibleCounts.set(record.clusterId, (visibleCounts.get(record.clusterId) || 0) + 1);
+  }
+  const query = normalizeSearch(state.topicSearch).toLowerCase();
+  return [...state.topics]
+    .filter((topic) => {
+      if (!query) return true;
+      const haystack = [
+        topicLabel(topic),
+        topic.summary,
+        Object.keys(topic.sourceMix || {}).join(" "),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    })
+    .sort(topicComparator(state.topicSort))
+    .map((topic) => ({
+      topic,
+      visibleCount: visibleCounts.get(topic.clusterId) || 0,
+      selected: topic.clusterId === state.selectedTopicId,
+    }));
 }
 
 export function backToTopic(state) {
@@ -193,6 +248,71 @@ export function spikeBadge(topic, threshold = 3) {
   };
 }
 
+export function trendSparklinePath(buckets = [], options = {}) {
+  const width = positiveNumber(options.width, 96);
+  const height = positiveNumber(options.height, 24);
+  const padding = Math.max(0, Number(options.padding ?? 2));
+  const values = buckets
+    .map((bucket) => Number(bucket.count ?? 0))
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) return "";
+  if (values.length === 1) {
+    const y = roundPath(height / 2);
+    return `M ${roundPath(padding)} ${y} L ${roundPath(width - padding)} ${y}`;
+  }
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min;
+  const usableWidth = Math.max(1, width - padding * 2);
+  const usableHeight = Math.max(1, height - padding * 2);
+  return values
+    .map((value, index) => {
+      const x = padding + (usableWidth * index) / (values.length - 1);
+      const ratio = span === 0 ? 0.5 : (value - min) / span;
+      const y = padding + usableHeight * (1 - ratio);
+      return `${index === 0 ? "M" : "L"} ${roundPath(x)} ${roundPath(y)}`;
+    })
+    .join(" ");
+}
+
+export function datePresetFilters(timeExtent, preset) {
+  if (preset === "all") return { start: "", end: "" };
+  const days = { "7d": 7, "30d": 30, "90d": 90 }[preset];
+  if (!days || !timeExtent?.max) return { start: "", end: "" };
+  const endDate = parseDateOnly(timeExtent.max);
+  if (!endDate) return { start: "", end: "" };
+  const startDate = new Date(endDate);
+  startDate.setUTCDate(startDate.getUTCDate() - days + 1);
+  const minDate = parseDateOnly(timeExtent.min);
+  const clampedStart = minDate && startDate < minDate ? minDate : startDate;
+  return {
+    start: toDateOnly(clampedStart),
+    end: toDateOnly(endDate),
+  };
+}
+
+export function applyDatePreset(state, preset) {
+  return updateFilters(state, datePresetFilters(state.timeExtent, preset));
+}
+
+export function selectedTopicExtentRecords(state, records = visibleRecords(state)) {
+  if (state.selectedTopicId === null || state.selectedTopicId === undefined) return records;
+  return records.filter((record) => record.clusterId === state.selectedTopicId);
+}
+
+function topicComparator(sort) {
+  if (sort === "name") {
+    return (a, b) => topicLabel(a).localeCompare(topicLabel(b)) || a.clusterId - b.clusterId;
+  }
+  if (sort === "spike") {
+    return (a, b) =>
+      (b.trend?.spikeScore || 0) - (a.trend?.spikeScore || 0) ||
+      b.size - a.size ||
+      a.clusterId - b.clusterId;
+  }
+  return (a, b) => b.size - a.size || a.clusterId - b.clusterId;
+}
+
 function normalizeTopicId(value) {
   if (value === null || value === undefined || value === "") return "";
   const parsed = Number(value);
@@ -212,4 +332,31 @@ function normalizeRecordId(value) {
 function normalizeListLimit(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : LIST_PAGE_SIZE;
+}
+
+function normalizeTopicSort(value) {
+  return TOPIC_SORTS.has(value) ? value : "size";
+}
+
+function normalizeSearch(value) {
+  return String(value ?? "").trim();
+}
+
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function roundPath(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function parseDateOnly(value) {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function toDateOnly(date) {
+  return date.toISOString().slice(0, 10);
 }
