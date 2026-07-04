@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, status
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -23,6 +22,9 @@ from datagraph.db import initialize_database
 from datagraph.models import HealthResponse
 from datagraph.runs.executor import RunExecutor
 from datagraph.settings import Settings, load_settings
+
+READ_ONLY_MESSAGE = "server is in read-only mode; mutating endpoints are disabled"
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 class ImmutableAssetStaticFiles(StaticFiles):
@@ -64,6 +66,21 @@ def create_app(
 
     app = FastAPI(title="Data Graph", lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    @app.middleware("http")
+    async def read_only_guard(request: Request, call_next: Callable) -> JSONResponse:
+        settings_for_request = getattr(request.app.state, "settings", resolved_settings)
+        if (
+            settings_for_request.read_only
+            and request.method in MUTATING_METHODS
+            and not _read_only_mutation_allowed(request)
+        ):
+            return JSONResponse(
+                {"detail": READ_ONLY_MESSAGE},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        return await call_next(request)
+
     app.include_router(graphs_router)
     app.include_router(records_router)
     app.include_router(embeddings_router)
@@ -76,7 +93,7 @@ def create_app(
     async def health() -> HealthResponse:
         return HealthResponse(status="ok")
 
-    dist_dir = Path(__file__).resolve().parents[1] / "dist"
+    dist_dir = resolved_settings.dist_dir
     if dist_dir.exists():
         assets_dir = dist_dir / "assets"
         if assets_dir.exists():
@@ -87,6 +104,15 @@ def create_app(
             return FileResponse(dist_dir / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
+
+
+def _read_only_mutation_allowed(request: Request) -> bool:
+    path = request.url.path.rstrip("/")
+    return (
+        request.method == "POST"
+        and path.startswith("/api/graphs/")
+        and path.endswith("/evidence")
+    )
 
 
 app = create_app()

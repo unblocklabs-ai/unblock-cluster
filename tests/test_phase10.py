@@ -140,19 +140,26 @@ def test_artifact_gzip_etag_cache_float_precision_and_records_slimming(
 
 
 def test_static_cache_control_headers(tmp_path: Path) -> None:
-    dist = Path(__file__).resolve().parents[1] / "dist"
+    repo_index = Path(__file__).resolve().parents[1] / "dist" / "index.html"
+    repo_index_before = repo_index.read_bytes() if repo_index.exists() else None
+    dist = tmp_path / "dist"
     assets = dist / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     (dist / "index.html").write_text("<!doctype html><title>Phase 10</title>", encoding="utf-8")
     (assets / "phase10-cache-test.js").write_text("console.log('phase10');", encoding="utf-8")
 
-    with TestClient(create_app(Settings(data_dir=tmp_path / "data", port=0))) as client:
+    settings = Settings(data_dir=tmp_path / "data", port=0, dist_dir=dist)
+    with TestClient(create_app(settings)) as client:
         index = client.get("/")
         assert index.status_code == 200
         assert index.headers["cache-control"] == "no-cache"
         asset = client.get("/assets/phase10-cache-test.js")
         assert asset.status_code == 200
         assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
+    if repo_index_before is None:
+        assert not repo_index.exists()
+    else:
+        assert repo_index.read_bytes() == repo_index_before
 
 
 def _assert_artifact_float_precision(artifact: dict[str, Any]) -> None:

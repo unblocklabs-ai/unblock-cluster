@@ -4,12 +4,16 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_DIST_DIR = Path(__file__).resolve().parents[1] / "dist"
+
 
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path
     port: int
     openai_api_key: str | None = None
+    read_only: bool = False
+    dist_dir: Path = DEFAULT_DIST_DIR
 
     @property
     def db_path(self) -> Path:
@@ -24,5 +28,11 @@ def load_settings() -> Settings:
     )
     port = int(os.environ.get("DATAGRAPH_PORT") or os.environ.get("DATA_GRAPH_PORT") or "8080")
     api_key = os.environ.get("OPENAI_API_KEY") or None
-    return Settings(data_dir=data_dir, port=port, openai_api_key=api_key)
+    read_only = _env_bool(os.environ.get("DATAGRAPH_READ_ONLY"))
+    return Settings(data_dir=data_dir, port=port, openai_api_key=api_key, read_only=read_only)
 
+
+def _env_bool(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}

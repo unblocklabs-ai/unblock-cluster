@@ -91,6 +91,31 @@ async def get_view(request: Request, graph_id: str, view_id: str) -> dict[str, A
     return _get_view_response(request.app.state.settings.db_path, graph_id, view_id)
 
 
+@router.delete("/{view_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_view(request: Request, graph_id: str, view_id: str) -> None:
+    view = _get_view_row(request.app.state.settings.db_path, graph_id, view_id)
+    if view["name"] == "all_records":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="all_records view cannot be deleted; delete the graph instead",
+        )
+    with connect(request.app.state.settings.db_path) as conn:
+        run_rows = fetch_all(
+            conn,
+            "SELECT id FROM runs WHERE graph_id = ? AND view_id = ? ORDER BY created_at ASC",
+            (graph_id, view_id),
+        )
+        run_ids = [row["id"] for row in run_rows]
+        conn.execute("DELETE FROM views WHERE graph_id = ? AND id = ?", (graph_id, view_id))
+        if run_ids:
+            placeholders = ", ".join("?" for _ in run_ids)
+            conn.execute(
+                f"DELETE FROM runs WHERE graph_id = ? AND id IN ({placeholders})",
+                (graph_id, *run_ids),
+            )
+        conn.commit()
+
+
 @router.get("/{view_id}/records")
 async def list_view_records(
     request: Request,

@@ -22,7 +22,7 @@ deletes and recreates its data directory (`output/demo-data` by default) on
 every run. The API binds to `127.0.0.1:8080` by default. Set `DATAGRAPH_PORT`
 or `DATA_GRAPH_PORT` to override the port, and `DATAGRAPH_DATA_DIR` or
 `DATA_GRAPH_DATA_DIR` to choose the SQLite data directory — see `.env.example`
-for the complete (three-variable) configuration surface. Developed and tested
+for the complete configuration surface. Developed and tested
 on Python 3.14.
 
 The demo above is fully offline. Running the real pipeline (OpenAI embeddings
@@ -52,6 +52,16 @@ npm run dev
 ```
 
 Vite serves the frontend on `127.0.0.1:4173` and proxies `/api` to the backend.
+
+Read-only mode:
+
+```sh
+DATAGRAPH_READ_ONLY=1 DATAGRAPH_DATA_DIR=data .venv/bin/python -m datagraph.main
+```
+
+Read-only mode is for sharing a finished graph without letting users mutate it.
+GETs, static assets, and `POST /api/graphs/:gid/evidence` remain available; all
+other `POST`, `PATCH`, `PUT`, and `DELETE` endpoints return `403`.
 
 ## Agent Contract
 
@@ -89,6 +99,13 @@ default `true`) on `cluster`, `layout`, `label`, and `trends`. Use
 repointing the view defaults. Promote a winner by rerunning it with
 `{"setDefault": true}` (or omitting the key). Clustering reruns reuse the
 existing embedding run, so promotion is cheap.
+
+Cleanup is explicit. `DELETE /api/graphs/:gid/views/:vid` deletes a non-
+`all_records` view and its view-scoped runs, leaving records and shared
+embeddings intact. `DELETE /api/graphs/:gid/runs/:runId` deletes only terminal
+runs that are not referenced by any view default; queued/running runs must be
+cancelled or finish first. Use these deletes to remove failed experiments after
+the tuning loop settles.
 
 ### Decomposing A Large Topic
 
@@ -299,6 +316,15 @@ Single-record reads still include `normalized`.
 
 409 artifact errors are rendered as actionable messages instead of a blank map.
 
+At 100k records, the expected frontend path is still a single artifact load:
+gzip should keep the wire artifact under the 12 MB budget, the map should first
+render within 15 seconds on a local machine, and list mode remains capped at 500
+rows with explicit show-more pagination. Evidence latency measured about 0.9s
+warm and about 2.2s truly cold at 100k, depending on OS page cache state. Use
+the scale benchmark below to
+measure the exact artifact/evidence/UI numbers on the target machine before a
+large customer demo.
+
 ## Evidence Recipes
 
 Agents can answer common questions with one synchronous REST call:
@@ -371,3 +397,19 @@ network calls.
 npm run check
 npm run build
 ```
+
+Manual scale benchmark:
+
+```sh
+.venv/bin/python scripts/bench_scale.py \
+  --size 100000 \
+  --data-dir output/bench-scale \
+  --json-out output/bench-scale/metrics.json
+```
+
+The benchmark is offline and deterministic by default. It seeds a fresh data
+directory, uploads records through the API in 1000-record batches, runs mock
+1536-dimensional embeddings, cluster, layout, scripted labels, and trends, then
+reports stage timings, cluster/layout phase durations, artifact cold/warm
+compose times, gzip wire bytes, evidence latency, peak RSS, and final DB size.
+Pass `--no-seed` only when intentionally exploring non-reproducible variation.

@@ -406,7 +406,7 @@ function renderRecordInspector(state) {
 
 function renderList(state, records) {
   const windowed = listWindow(records, state);
-  const signature = `${records.map((record) => record.id).join("|")}::${windowed.showing}`;
+  const signature = `${recordsSignature(records)}::${windowed.showing}`;
   if (signature === runtime.listSignature) {
     updateListSelectionClasses(state);
     return;
@@ -475,18 +475,19 @@ function renderMap(state, records, options = {}) {
       view: new View({ center: [0, 0], resolution: 1, projection: LAYOUT_PROJECTION }),
     });
   }
-  const signature = records.map((record) => record.id).join("|");
+  const signature = recordsSignature(records);
   if (rebuildSource || signature !== runtime.recordsSignature) {
     runtime.recordsSignature = signature;
     runtime.source.clear();
-    for (const record of records) {
-      runtime.source.addFeature(
-        new Feature({
-          geometry: new Point([record.x, record.y]),
-          record,
-        }),
-      );
-    }
+    runtime.source.addFeatures(
+      records.map(
+        (record) =>
+          new Feature({
+            geometry: new Point([record.x, record.y]),
+            record,
+          }),
+      ),
+    );
   }
   if (!runtime.mapClickBound) {
     runtime.map.on("singleclick", (event) => {
@@ -502,6 +503,18 @@ function renderMap(state, records, options = {}) {
   } else {
     fitInitialView();
   }
+}
+
+function recordsSignature(records) {
+  if (!records.length) return "0";
+  const step = Math.max(1, Math.floor(records.length / 16));
+  const sampled = [];
+  for (let index = 0; index < records.length; index += step) {
+    sampled.push(records[index].id);
+  }
+  const last = records[records.length - 1];
+  if (sampled[sampled.length - 1] !== last.id) sampled.push(last.id);
+  return `${records.length}:${sampled.join("|")}`;
 }
 
 function scheduleMapUpdate(options = {}) {
