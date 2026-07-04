@@ -6,7 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
-from datagraph.api.facets import facet_counts_by_cluster, validate_facet_by
+from datagraph.api.facets import (
+    facet_counts_by_cluster,
+    summarize_run_id_for_cluster_run,
+    validate_facet_by,
+)
 from datagraph.api.records import include_normalized, list_records_for_graph
 from datagraph.api.runs import _to_response
 from datagraph.api.warnings import resolved_run_warnings
@@ -469,6 +473,7 @@ async def list_topics(
             run_id,
             facet_by,
             cluster_ids=[int(row["cluster_id"]) for row in rows],
+            summarize_run_id=summarize_run_id_for_cluster_run(conn, run),
         )
         warnings = resolved_run_warnings(
             conn,
@@ -523,7 +528,13 @@ async def get_topic(
         )
         labels = _latest_labels_by_cluster(conn, run_id)
         trends = _trend_snapshots_by_cluster(conn, graph_id, view_id, run_id)
-        facets = facet_counts_by_cluster(conn, run_id, facet_by, cluster_ids=[cluster_id])
+        facets = facet_counts_by_cluster(
+            conn,
+            run_id,
+            facet_by,
+            cluster_ids=[cluster_id],
+            summarize_run_id=summarize_run_id_for_cluster_run(conn, run),
+        )
         warnings = resolved_run_warnings(
             conn,
             graph_id=graph_id,

@@ -27,7 +27,7 @@ def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
     initialize_database(db_path)
 
     with connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         tables = {
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -46,6 +46,8 @@ def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
             "trend_results",
             "trend_summaries",
             "analysis_events",
+            "record_summaries",
+            "summary_items",
         } <= tables
         indexes = {
             row["name"]
@@ -56,6 +58,7 @@ def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
             "idx_records_graph_source_type",
             "idx_cluster_memberships_run_cluster",
             "idx_trend_results_run_cluster",
+            "idx_summary_items_run_status",
         } <= indexes
 
 
