@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
+from datagraph.api.facets import facet_counts_by_cluster, validate_facet_by
 from datagraph.core.ids import new_id, now_iso
 from datagraph.core.scope import ScopeValidationError, compile_scope
 from datagraph.core.time import TimestampValidationError, parse_timestamp
@@ -38,7 +39,10 @@ SUMMARY_SECTION_BY_RECIPE = {
 
 @router.post("")
 async def create_evidence(request: Request, graph_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    _reject_unknown_body(body, {"viewId", "recipe", "timeRange", "periods", "topicId", "topK"})
+    _reject_unknown_body(
+        body,
+        {"viewId", "recipe", "timeRange", "periods", "topicId", "topK", "facetBy"},
+    )
     view_id = _required_string(body.get("viewId"), "viewId")
     recipe = _required_string(body.get("recipe"), "recipe")
     if recipe not in VALID_RECIPES:
@@ -55,6 +59,7 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
         _validate_topic_id_shape(body.get("topicId"))
     if recipe == "compare_periods":
         _validate_periods_shape(body.get("periods"))
+    facet_by = validate_facet_by(body.get("facetBy"))
     top_k = _validate_top_k(body.get("topK", 10))
     db_path = request.app.state.settings.db_path
     cluster_run = _resolve_cluster_run(db_path, graph_id, view_id)
@@ -67,6 +72,7 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
     with connect(db_path) as conn:
         summaries = _load_cluster_summaries(conn, cluster_run_id)
         labels = _latest_labels_by_cluster(conn, cluster_run_id)
+        facets = facet_counts_by_cluster(conn, cluster_run_id, facet_by)
         label_run_id = _matching_default_label_run_id(conn, graph_id, view_id, cluster_run_id)
         input_refs = json.loads(cluster_run["input_refs_json"])
         run_refs = {
@@ -88,6 +94,7 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
                 top_k,
                 summaries,
                 labels,
+                facets,
             )
             topic_trend = _topic_persisted_trend(
                 conn,
@@ -106,6 +113,7 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
                 trend_run,
                 summaries,
                 labels,
+                facets,
                 body.get("periods"),
                 top_k,
             )
@@ -116,6 +124,7 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
                 trend_run,
                 summaries,
                 labels,
+                facets,
                 recipe,
                 body.get("timeRange"),
                 top_k,
@@ -141,6 +150,7 @@ def _summary_recipe(
     trend_run: dict[str, Any],
     summaries: dict[int, dict[str, Any]],
     labels: dict[int, dict[str, Any]],
+    facets: dict[int, dict[str, int]],
     recipe: str,
     time_range: Any,
     top_k: int,
@@ -158,6 +168,7 @@ def _summary_recipe(
     section = computation.summary[SUMMARY_SECTION_BY_RECIPE[recipe]]
     return [
         _enrich_topic_entry(row, summaries, labels)
+        | ({"facets": facets[row["clusterId"]]} if row["clusterId"] in facets else {})
         for row in section[:top_k]
         if row["clusterId"] in summaries
     ]
@@ -172,13 +183,14 @@ def _topic_evidence(
     top_k: int,
     summaries: dict[int, dict[str, Any]],
     labels: dict[int, dict[str, Any]],
+    facets: dict[int, dict[str, int]],
 ) -> dict[str, Any]:
     _validate_topic_id_shape(topic_id)
     if topic_id not in summaries:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="topic not found")
     summary = summaries[topic_id]
     representative_ids = summary["representativeRecordIds"][:top_k]
-    return {
+    evidence = {
         "clusterId": topic_id,
         "label": labels.get(topic_id),
         "size": summary["size"],
@@ -195,6 +207,9 @@ def _topic_evidence(
         "viewId": view_id,
         "graphId": graph_id,
     }
+    if topic_id in facets:
+        evidence["facets"] = facets[topic_id]
+    return evidence
 
 
 def _compare_periods(
@@ -203,6 +218,7 @@ def _compare_periods(
     trend_run: dict[str, Any],
     summaries: dict[int, dict[str, Any]],
     labels: dict[int, dict[str, Any]],
+    facets: dict[int, dict[str, int]],
     periods: Any,
     top_k: int,
 ) -> list[dict[str, Any]]:
@@ -223,19 +239,20 @@ def _compare_periods(
         b_count = sum(point.count for point in b_points)
         a_mean_share = _mean_share(a_points)
         b_mean_share = _mean_share(b_points)
-        rows.append(
-            _enrich_topic_entry(
-                {
-                    "clusterId": cluster_id,
-                    "periodA": {"count": a_count, "meanShare": a_mean_share},
-                    "periodB": {"count": b_count, "meanShare": b_mean_share},
-                    "deltaCount": b_count - a_count,
-                    "deltaShare": b_mean_share - a_mean_share,
-                },
-                summaries,
-                labels,
-            )
+        row = _enrich_topic_entry(
+            {
+                "clusterId": cluster_id,
+                "periodA": {"count": a_count, "meanShare": a_mean_share},
+                "periodB": {"count": b_count, "meanShare": b_mean_share},
+                "deltaCount": b_count - a_count,
+                "deltaShare": b_mean_share - a_mean_share,
+            },
+            summaries,
+            labels,
         )
+        if cluster_id in facets:
+            row["facets"] = facets[cluster_id]
+        rows.append(row)
     return sorted(rows, key=lambda row: (-abs(row["deltaShare"]), row["clusterId"]))[:top_k]
 
 

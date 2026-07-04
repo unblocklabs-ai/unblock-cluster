@@ -712,8 +712,12 @@ says 0.0 ("pack points densely… cleaner separations"); the mega-topic is
 EOM's documented signature ("one or two large clusters plus many small
 ones"); hdbscan's BranchDetector is explicitly not a re-clustering tool;
 BERTopic has no drill-down either (merge-only hierarchy). Phase 11
-decisions: expose `cluster.space.minDist` default 0.0 (quality-eval
-re-gated); `focus: {clusterRunId, clusterId}` reclustering — local UMAP
+decisions: expose `cluster.space.minDist` (OUTCOME: the UMAP-docs-recommended
+0.0 default was falsified by the real-key eval — ARI 0.697 vs 0.860, 64 vs
+43 clusters, over-fragmentation per the docs' own "false tears" warning —
+so the default stays 0.1 with 0.0 documented as a setDefault:false
+experiment; our empirical evals outrank generic library guidance for this
+data regime); `focus: {clusterRunId, clusterId}` reclustering — local UMAP
 re-spreads variance the global projection compressed; focus runs are
 inspection runs (setDefault forced false, read via ?clusterRunId=
 overrides); `facetBy` breakdowns on topics/evidence reads (generalizing

@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
+from datagraph.api.facets import facet_counts_by_cluster, validate_facet_by
 from datagraph.api.records import include_normalized, list_records_for_graph
 from datagraph.api.runs import _to_response
 from datagraph.api.warnings import resolved_run_warnings
@@ -139,10 +140,29 @@ async def create_cluster_run(
     set_default_param: bool | None = Query(default=None, alias="setDefault"),
 ) -> dict[str, Any]:
     body = body or {}
-    _reject_unknown_body(body, {"embeddingRunId", "cluster", "setDefault"})
-    set_default = _set_default_from_request(body, set_default_param)
+    _reject_unknown_body(body, {"embeddingRunId", "cluster", "setDefault", "focus"})
     graph = _get_graph_row(request.app.state.settings.db_path, graph_id)
     _get_view_row(request.app.state.settings.db_path, graph_id, view_id)
+    focus = _resolve_focus(
+        request.app.state.settings.db_path,
+        graph_id,
+        view_id,
+        body.get("focus"),
+    )
+    if focus is not None and (body.get("setDefault") is True or set_default_param is True):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=[
+                {
+                    "field": "setDefault",
+                    "message": (
+                        "focus drill-down cluster runs cannot become the view default; "
+                        "their population is a subset of the full view artifact/layout"
+                    ),
+                }
+            ],
+        )
+    set_default = False if focus is not None else _set_default_from_request(body, set_default_param)
     embedding_run_id = body.get("embeddingRunId") or _latest_succeeded_embedding_run(
         request.app.state.settings.db_path,
         graph_id,
@@ -161,8 +181,21 @@ async def create_cluster_run(
             detail=exc.errors,
         ) from exc
     if merged["cluster"]["space"]["method"] == "none":
-        population = _view_record_count(request.app.state.settings.db_path, graph_id, view_id)
+        population = (
+            _focus_view_member_count(
+                request.app.state.settings.db_path,
+                graph_id,
+                view_id,
+                focus,
+            )
+            if focus is not None
+            else _view_record_count(request.app.state.settings.db_path, graph_id, view_id)
+        )
         validate_none_space_population(population)
+    input_refs = {"embeddingRunId": embedding_run_id, "viewId": view_id}
+    if focus is not None:
+        input_refs["focusClusterRunId"] = focus["clusterRunId"]
+        input_refs["focusClusterId"] = focus["clusterId"]
     run_id = request.app.state.run_executor.enqueue_run(
         graph_id,
         run_type="cluster",
@@ -171,8 +204,9 @@ async def create_cluster_run(
             "embeddingRunId": embedding_run_id,
             "cluster": merged["cluster"],
             "setDefault": set_default,
+            **({"focus": focus} if focus is not None else {}),
         },
-        input_refs={"embeddingRunId": embedding_run_id, "viewId": view_id},
+        input_refs=input_refs,
     )
     row = request.app.state.run_executor.get_run(graph_id, run_id)
     return _to_response(row).model_dump()
@@ -382,7 +416,9 @@ async def list_topics(
     graph_id: str,
     view_id: str,
     clusterRunId: str | None = None,
+    facetBy: str | None = None,
 ) -> dict[str, Any]:
+    facet_by = validate_facet_by(facetBy)
     run = _resolve_cluster_run(
         request.app.state.settings.db_path,
         graph_id,
@@ -403,6 +439,12 @@ async def list_topics(
         )
         labels = _latest_labels_by_cluster(conn, run_id)
         trends = _trend_snapshots_by_cluster(conn, graph_id, view_id, run_id)
+        facets = facet_counts_by_cluster(
+            conn,
+            run_id,
+            facet_by,
+            cluster_ids=[int(row["cluster_id"]) for row in rows],
+        )
         warnings = resolved_run_warnings(
             conn,
             graph_id=graph_id,
@@ -420,7 +462,12 @@ async def list_topics(
         },
         "warnings": warnings,
         "topics": [
-            _topic_response(row, labels.get(row["cluster_id"]), trends.get(row["cluster_id"]))
+            _topic_response(
+                row,
+                labels.get(row["cluster_id"]),
+                trends.get(row["cluster_id"]),
+                facets.get(int(row["cluster_id"])) if facet_by else None,
+            )
             for row in rows
         ],
     }
@@ -433,7 +480,9 @@ async def get_topic(
     view_id: str,
     cluster_id: int,
     clusterRunId: str | None = None,
+    facetBy: str | None = None,
 ) -> dict[str, Any]:
+    facet_by = validate_facet_by(facetBy)
     run = _resolve_cluster_run(
         request.app.state.settings.db_path,
         graph_id,
@@ -449,6 +498,7 @@ async def get_topic(
         )
         labels = _latest_labels_by_cluster(conn, run_id)
         trends = _trend_snapshots_by_cluster(conn, graph_id, view_id, run_id)
+        facets = facet_counts_by_cluster(conn, run_id, facet_by, cluster_ids=[cluster_id])
         warnings = resolved_run_warnings(
             conn,
             graph_id=graph_id,
@@ -462,7 +512,12 @@ async def get_topic(
         "clusterRunId": run_id,
         "embeddingRunId": refs.get("embeddingRunId"),
         "warnings": warnings,
-        "topic": _topic_response(row, labels.get(cluster_id), trends.get(cluster_id)),
+        "topic": _topic_response(
+            row,
+            labels.get(cluster_id),
+            trends.get(cluster_id),
+            facets.get(cluster_id) if facet_by else None,
+        ),
     }
 
 
@@ -644,6 +699,76 @@ def _view_record_count(db_path: str, graph_id: str, view_id: str) -> int:
             f"SELECT COUNT(*) FROM records r WHERE r.graph_id = ? AND {where}",
             (graph_id, *params),
         ).fetchone()[0]
+
+
+def _focus_view_member_count(
+    db_path: str,
+    graph_id: str,
+    view_id: str,
+    focus: dict[str, Any],
+) -> int:
+    view = _get_view_row(db_path, graph_id, view_id)
+    where, params = compile_scope(json.loads(view["scope_json"]), alias="r")
+    with connect(db_path) as conn:
+        return conn.execute(
+            f"""
+            SELECT COUNT(*)
+              FROM cluster_memberships cm
+              JOIN records r ON r.id = cm.record_id
+             WHERE cm.run_id = ? AND cm.cluster_id = ?
+               AND r.graph_id = ? AND {where}
+            """,
+            (focus["clusterRunId"], focus["clusterId"], graph_id, *params),
+        ).fetchone()[0]
+
+
+def _resolve_focus(
+    db_path: str,
+    graph_id: str,
+    view_id: str,
+    value: Any,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=[{"field": "focus", "message": "must be an object"}],
+        )
+    unknown = sorted(set(value) - {"clusterRunId", "clusterId"})
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=[
+                {"field": f"focus.{key}", "message": "unknown request key"}
+                for key in unknown
+            ],
+        )
+    cluster_id = value.get("clusterId")
+    if not isinstance(cluster_id, int) or isinstance(cluster_id, bool):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=[{"field": "focus.clusterId", "message": "must be an integer"}],
+        )
+    cluster_run = _resolve_cluster_run(db_path, graph_id, view_id, value.get("clusterRunId"))
+    with connect(db_path) as conn:
+        rows = fetch_all(
+            conn,
+            """
+            SELECT cluster_id
+              FROM cluster_summaries
+             WHERE run_id = ?
+             ORDER BY cluster_id ASC
+            """,
+            (cluster_run["id"],),
+        )
+    valid_ids = [int(row["cluster_id"]) for row in rows]
+    if cluster_id not in valid_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"focus clusterId not found; valid ids: {valid_ids}",
+        )
+    return {"clusterRunId": cluster_run["id"], "clusterId": cluster_id}
 
 
 def _resolve_cluster_run(
@@ -867,8 +992,9 @@ def _topic_response(
     row: dict,
     label: dict[str, Any] | None = None,
     trend: dict[str, Any] | None = None,
+    facets: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    return {
+    topic = {
         "clusterId": row["cluster_id"],
         "label": label,
         "trend": trend,
@@ -877,6 +1003,9 @@ def _topic_response(
         "representativeRecordIds": json.loads(row["representative_record_ids_json"]),
         "sourceMix": json.loads(row["source_mix_json"]),
     }
+    if facets is not None:
+        topic["facets"] = facets
+    return topic
 
 
 def _topic_record_response(row: dict) -> dict[str, Any]:

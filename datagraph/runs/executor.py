@@ -296,6 +296,7 @@ class RunExecutor:
                 params["embeddingRunId"],
                 params["cluster"],
                 params.get("setDefault", True),
+                params.get("focus"),
             )
         elif row["type"] == "layout":
             stats = await loop.run_in_executor(
