@@ -8,6 +8,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from datagraph.api.artifact import router as artifact_router
 from datagraph.api.embeddings import router as embeddings_router
@@ -22,6 +23,13 @@ from datagraph.db import initialize_database
 from datagraph.models import HealthResponse
 from datagraph.runs.executor import RunExecutor
 from datagraph.settings import Settings, load_settings
+
+
+class ImmutableAssetStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope: dict) -> FileResponse:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
 
 
 def create_app(
@@ -55,6 +63,7 @@ def create_app(
             await executor.stop()
 
     app = FastAPI(title="Data Graph", lifespan=lifespan)
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.include_router(graphs_router)
     app.include_router(records_router)
     app.include_router(embeddings_router)
@@ -71,11 +80,11 @@ def create_app(
     if dist_dir.exists():
         assets_dir = dist_dir / "assets"
         if assets_dir.exists():
-            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+            app.mount("/assets", ImmutableAssetStaticFiles(directory=assets_dir), name="assets")
 
         @app.get("/", include_in_schema=False)
         async def index() -> FileResponse:
-            return FileResponse(dist_dir / "index.html")
+            return FileResponse(dist_dir / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
 

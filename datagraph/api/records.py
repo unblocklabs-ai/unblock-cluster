@@ -64,6 +64,7 @@ async def list_records(
     graph_id: str,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    include: str | None = None,
     sourceType: str | None = None,
     product: str | None = None,
     sentiment: str | None = None,
@@ -76,6 +77,7 @@ async def list_records(
         graph_id,
         limit=limit,
         offset=offset,
+        include_normalized=include_normalized(include),
         filters={
             "sourceType": sourceType,
             "product": product,
@@ -110,6 +112,7 @@ def list_records_for_graph(
     *,
     limit: int,
     offset: int,
+    include_normalized: bool = False,
     filters: dict[str, str | None] | None = None,
     extra_where: str | None = None,
     extra_params: list[object] | None = None,
@@ -138,15 +141,15 @@ def list_records_for_graph(
             (*params, limit, offset),
         )
     return {
-        "records": [record_response(row) for row in rows],
+        "records": [record_response(row, include_normalized=include_normalized) for row in rows],
         "total": total,
         "limit": limit,
         "offset": offset,
     }
 
 
-def record_response(row: dict) -> dict[str, Any]:
-    return {
+def record_response(row: dict, *, include_normalized: bool = True) -> dict[str, Any]:
+    payload = {
         "id": row["id"],
         "graphId": row["graph_id"],
         "recordId": row["record_key"],
@@ -164,10 +167,16 @@ def record_response(row: dict) -> dict[str, Any]:
         "timestamp": row["timestamp_utc"],
         "timestampMs": row["timestamp_ms"],
         "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else None,
-        "normalized": json.loads(row["normalized_json"]),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
     }
+    if include_normalized:
+        payload["normalized"] = json.loads(row["normalized_json"])
+    return payload
+
+
+def include_normalized(value: str | None) -> bool:
+    return value == "normalized"
 
 
 def _upsert_valid_records(

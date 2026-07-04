@@ -5,10 +5,12 @@ import {
   backToTopic,
   buildViewState,
   clearTopicSelection,
+  listWindow,
   parseViewParams,
   representativeRecords,
   selectRecord,
   selectTopic,
+  showMoreListRecords,
   spikeBadge,
   updateFilters,
   visibleRecords,
@@ -126,7 +128,7 @@ test("selects and clears topic state", () => {
   let state = selectTopic(buildViewState(artifact), 1);
   assert.equal(state.selectedTopicId, 1);
   assert.equal(state.selectedRecordId, null);
-  assert.equal(state.filters.topicId, 1);
+  assert.equal(state.filters.topicId, "");
 
   state = clearTopicSelection(state);
   assert.equal(state.selectedTopicId, null);
@@ -140,16 +142,16 @@ test("transitions from topic to record and back to topic", () => {
 
   assert.equal(state.selectedTopicId, 1);
   assert.equal(state.selectedRecordId, "r2");
-  assert.equal(state.filters.topicId, 1);
+  assert.equal(state.filters.topicId, "");
   assert.deepEqual(
     visibleRecords(state).map((record) => record.id),
-    ["r1", "r2"],
+    ["r1", "r2", "r3"],
   );
 
   state = backToTopic(state);
   assert.equal(state.selectedTopicId, 1);
   assert.equal(state.selectedRecordId, null);
-  assert.equal(state.filters.topicId, 1);
+  assert.equal(state.filters.topicId, "");
 });
 
 test("record selection from list, map, and representative card converges selection state", () => {
@@ -169,7 +171,42 @@ test("record selection from list, map, and representative card converges selecti
   assert.deepEqual(publicSelection(fromMap), publicSelection(fromList));
   assert.deepEqual(publicSelection(fromCard), publicSelection(fromList));
   assert.equal(fromList.filters.topicId, "");
-  assert.equal(fromCard.filters.topicId, 2);
+  assert.equal(fromCard.filters.topicId, "");
+});
+
+test("list window caps rows and advances by page without touching filters", () => {
+  const largeArtifact = {
+    ...artifact,
+    data: Array.from({ length: 1205 }, (_, index) => ({
+      ...artifact.data[index % artifact.data.length],
+      id: `r${index + 1}`,
+      recordId: `rec-${index + 1}`,
+    })),
+  };
+  let state = buildViewState(largeArtifact);
+  let page = listWindow(visibleRecords(state), state);
+
+  assert.equal(page.showing, 500);
+  assert.equal(page.total, 1205);
+  assert.equal(page.records.length, 500);
+  assert.equal(page.remaining, 705);
+
+  state = showMoreListRecords(state);
+  page = listWindow(visibleRecords(state), state);
+  assert.equal(page.showing, 1000);
+  assert.equal(page.remaining, 205);
+  assert.deepEqual(state.filters, buildViewState(largeArtifact).filters);
+
+  state = showMoreListRecords(state);
+  page = listWindow(visibleRecords(state), state);
+  assert.equal(page.showing, 1205);
+  assert.equal(page.remaining, 0);
+
+  state = updateFilters(state, { query: "energy" });
+  page = listWindow(visibleRecords(state), state);
+  assert.equal(state.listLimit, 500);
+  assert.equal(page.total, 402);
+  assert.equal(page.showing, 402);
 });
 
 test("resolves representatives and trend spike badge", () => {

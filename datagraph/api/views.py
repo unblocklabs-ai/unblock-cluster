@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
-from datagraph.api.records import list_records_for_graph
+from datagraph.api.records import include_normalized, list_records_for_graph
 from datagraph.api.runs import _to_response
 from datagraph.api.warnings import resolved_run_warnings
 from datagraph.core.config import (
@@ -97,6 +97,7 @@ async def list_view_records(
     view_id: str,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    include: str | None = None,
     sourceType: str | None = None,
     product: str | None = None,
     sentiment: str | None = None,
@@ -116,6 +117,7 @@ async def list_view_records(
         graph_id,
         limit=limit,
         offset=offset,
+        include_normalized=include_normalized(include),
         filters={
             "sourceType": sourceType,
             "product": product,
