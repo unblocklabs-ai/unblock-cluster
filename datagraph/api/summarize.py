@@ -6,7 +6,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 
 from datagraph.api.runs import _to_response
-from datagraph.core.config import ConfigValidationError, apply_summarization_overrides
+from datagraph.core.config import (
+    ConfigValidationError,
+    apply_summarization_overrides,
+    load_graph_config,
+)
 from datagraph.db import connect, fetch_one
 from datagraph.runs.summarize import summarize_run_report
 
@@ -25,7 +29,7 @@ async def create_summarize_run(
         graph = fetch_one(conn, "SELECT * FROM graphs WHERE id = ?", (graph_id,))
     if graph is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="graph not found")
-    config = json.loads(graph["config_json"])
+    config = load_graph_config(graph)
     try:
         merged = apply_summarization_overrides(config, body.get("summarization", {}))
     except ConfigValidationError as exc:
@@ -64,13 +68,18 @@ async def get_summarize_run_report(
         )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="summarize run not found")
+    stats = json.loads(row["stats_json"])
     report = summarize_run_report(request.app.state.settings.db_path, run_id)
     return {
         "graphId": graph_id,
         "runId": run_id,
         "status": row["status"],
         "params": json.loads(row["params_json"]),
-        "stats": json.loads(row["stats_json"]),
+        "stats": stats,
+        "tokenUsage": stats.get(
+            "tokenUsage",
+            {"promptTokens": 0, "completionTokens": 0, "totalTokens": 0},
+        ),
         **report,
     }
 

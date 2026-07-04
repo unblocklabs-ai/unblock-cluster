@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from typing import Any
 
@@ -49,6 +50,17 @@ class ConfigValidationError(ValueError):
     def __init__(self, errors: list[dict[str, str]]) -> None:
         self.errors = errors
         super().__init__("invalid graph config")
+
+
+def load_graph_config(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        stored = json.loads(row["config_json"])
+    except (KeyError, TypeError, json.JSONDecodeError):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    errors: list[dict[str, str]] = []
+    return _merge_section(DEFAULT_GRAPH_CONFIG, stored, "config", errors)
 
 
 def validate_graph_config(config: Any, *, require_text_fields: bool = True) -> dict[str, Any]:

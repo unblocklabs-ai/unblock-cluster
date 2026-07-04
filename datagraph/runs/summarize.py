@@ -13,6 +13,9 @@ from datagraph.core.openai_client import (
     ClockFunc,
     SleepFunc,
     TokenBucketRateLimiter,
+    add_token_usage,
+    token_usage_dict,
+    zero_token_usage,
 )
 from datagraph.core.summarization import (
     SummaryProvider,
@@ -66,6 +69,7 @@ async def execute_summarize_run(
                 provider_retries=0,
                 model=model,
                 prompt_hash=prompt_hash,
+                token_usage=zero_token_usage(),
             ),
         )
         return
@@ -110,6 +114,7 @@ async def execute_summarize_run(
                 provider_retries=0,
                 model=model,
                 prompt_hash=prompt_hash,
+                token_usage=zero_token_usage(),
             ),
         )
         return
@@ -136,10 +141,11 @@ async def execute_summarize_run(
     failed_record_ids: list[str] = []
     provider_requests = 0
     provider_retries = 0
+    token_usage = zero_token_usage()
     progress_lock = asyncio.Lock()
 
     async def worker() -> None:
-        nonlocal summarized, failed, provider_requests, provider_retries
+        nonlocal summarized, failed, provider_requests, provider_retries, token_usage
         while True:
             item = await queue.get()
             if item is None or cancel_event.is_set():
@@ -167,6 +173,7 @@ async def execute_summarize_run(
                 )
                 _update_record_item_status(db_path, run_id, item["recordId"], "summarized")
                 async with progress_lock:
+                    token_usage = add_token_usage(token_usage, result.token_usage)
                     summarized += 1
                     update_progress(
                         run_id,
@@ -232,6 +239,7 @@ async def execute_summarize_run(
             provider_retries=provider_retries,
             model=model,
             prompt_hash=prompt_hash,
+            token_usage=token_usage,
         ),
     )
     if summarized + reused == 0 and not cancel_event.is_set():
@@ -249,6 +257,7 @@ def _stats(
     provider_retries: int,
     model: str,
     prompt_hash: str,
+    token_usage: Any,
 ) -> dict[str, Any]:
     return {
         "records": total,
@@ -260,6 +269,7 @@ def _stats(
         "providerRetries": provider_retries,
         "model": model,
         "promptHash": prompt_hash,
+        "tokenUsage": token_usage_dict(token_usage),
     }
 
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -10,6 +9,7 @@ from datagraph.core.config import (
     DEFAULT_GRAPH_CONFIG,
     ConfigValidationError,
     apply_embedding_overrides,
+    load_graph_config,
 )
 from datagraph.db import connect, fetch_one
 
@@ -36,7 +36,7 @@ async def create_embedding_run(
         graph = fetch_one(conn, "SELECT * FROM graphs WHERE id = ?", (graph_id,))
     if graph is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="graph not found")
-    config = json.loads(graph["config_json"])
+    config = load_graph_config(graph)
     try:
         merged = apply_embedding_overrides(config, embedding_overrides)
     except ConfigValidationError as exc:

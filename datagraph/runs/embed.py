@@ -79,6 +79,7 @@ async def execute_embedding_run(
                 "providerRetries": 0,
                 "model": model,
                 "dimensions": dimensions,
+                "tokenUsage": _embedding_token_usage(0),
                 **representation_stats,
             },
         )
@@ -111,6 +112,7 @@ async def execute_embedding_run(
                 "providerRetries": 0,
                 "model": model,
                 "dimensions": dimensions,
+                "tokenUsage": _embedding_token_usage(0),
                 **representation_stats,
             },
         )
@@ -132,6 +134,7 @@ async def execute_embedding_run(
     embedded_items = 0
     provider_requests = 0
     provider_retries = 0
+    prompt_tokens_total = 0
     progress_lock = asyncio.Lock()
     batch_queue: asyncio.Queue[tuple[list[str], list[str]] | None] = asyncio.Queue()
     for hashes, batch in zip(batch_hashes, batches, strict=True):
@@ -141,7 +144,7 @@ async def execute_embedding_run(
         batch_queue.put_nowait(None)
 
     async def worker() -> None:
-        nonlocal embedded_items, provider_requests, provider_retries
+        nonlocal embedded_items, provider_requests, provider_retries, prompt_tokens_total
         while True:
             item = await batch_queue.get()
             if item is None:
@@ -153,9 +156,14 @@ async def execute_embedding_run(
                 await limiter.acquire()
                 if cancel_event.is_set():
                     raise EmbeddingRunCancelled
-                vectors, attempts = await embed_with_retry(provider, texts, sleep=sleep)
+                vectors, attempts, prompt_tokens = await embed_with_retry(
+                    provider,
+                    texts,
+                    sleep=sleep,
+                )
                 provider_requests += 1
                 provider_retries += attempts - 1
+                prompt_tokens_total += prompt_tokens
             _store_vectors(db_path, model, dimensions, hashes, vectors)
             _update_item_statuses(db_path, run_id, hashes, "embedded")
             async with progress_lock:
@@ -184,6 +192,7 @@ async def execute_embedding_run(
                 "providerRetries": provider_retries,
                 "model": model,
                 "dimensions": dimensions,
+                "tokenUsage": _embedding_token_usage(prompt_tokens_total),
                 **representation_stats,
             },
         )
@@ -204,9 +213,18 @@ async def execute_embedding_run(
             "providerRetries": provider_retries,
             "model": model,
             "dimensions": dimensions,
+            "tokenUsage": _embedding_token_usage(prompt_tokens_total),
             **representation_stats,
         },
     )
+
+
+def _embedding_token_usage(prompt_tokens: int) -> dict[str, int]:
+    return {
+        "promptTokens": prompt_tokens,
+        "completionTokens": 0,
+        "totalTokens": prompt_tokens,
+    }
 
 
 def _load_raw_snapshot(

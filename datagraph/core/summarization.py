@@ -4,12 +4,20 @@ import asyncio
 import hashlib
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from openai import AsyncOpenAI
 
-from datagraph.core.openai_client import MAX_RETRY_ATTEMPTS, SleepFunc, _is_retryable, _retry_after
+from datagraph.core.openai_client import (
+    MAX_RETRY_ATTEMPTS,
+    SleepFunc,
+    TokenUsage,
+    _is_retryable,
+    _retry_after,
+    token_usage_from_response_usage,
+    zero_token_usage,
+)
 
 JUNK_TYPES = {
     "none",
@@ -71,6 +79,7 @@ class SummaryResult:
     sentiment: str | None
     key_customer_phrases: list[str]
     junk_type: str
+    token_usage: TokenUsage = field(default_factory=zero_token_usage)
 
 
 class SummaryProvider(Protocol):
@@ -116,7 +125,16 @@ class OpenAIChatSummaryProvider:
             payload = json.loads(content)
         except json.JSONDecodeError as exc:
             raise SummaryValidationError("summary provider returned invalid JSON") from exc
-        return validate_summary_result(payload)
+        result = validate_summary_result(payload)
+        return SummaryResult(
+            issue=result.issue,
+            product=result.product,
+            desired_resolution=result.desired_resolution,
+            sentiment=result.sentiment,
+            key_customer_phrases=result.key_customer_phrases,
+            junk_type=result.junk_type,
+            token_usage=token_usage_from_response_usage(response.usage),
+        )
 
 
 def make_summary_provider(
@@ -226,13 +244,13 @@ def validate_summary_result(value: Any) -> SummaryResult:
     junk_type = value.get("junkType")
     if not isinstance(issue, str) or not issue.strip():
         raise SummaryValidationError("issue must be a non-empty string")
-    for field, field_value in (
+    for field_name, field_value in (
         ("product", product),
         ("desiredResolution", desired_resolution),
         ("sentiment", sentiment),
     ):
         if field_value is not None and not isinstance(field_value, str):
-            raise SummaryValidationError(f"{field} must be a string or null")
+            raise SummaryValidationError(f"{field_name} must be a string or null")
     if not isinstance(phrases, list) or not all(isinstance(item, str) for item in phrases):
         raise SummaryValidationError("keyCustomerPhrases must be a list of strings")
     cleaned_phrases = [phrase.strip() for phrase in phrases if phrase.strip()]

@@ -5,7 +5,12 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from datagraph.core.config import ConfigValidationError, apply_config_patch, validate_graph_config
+from datagraph.core.config import (
+    ConfigValidationError,
+    apply_config_patch,
+    load_graph_config,
+    validate_graph_config,
+)
 from datagraph.core.ids import new_id, now_iso
 from datagraph.core.scope import ScopeValidationError, compile_scope
 from datagraph.db import connect, fetch_all, fetch_one
@@ -75,7 +80,7 @@ async def patch_graph(request: Request, graph_id: str, body: dict[str, Any]) -> 
         row = fetch_one(conn, "SELECT * FROM graphs WHERE id = ?", (graph_id,))
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="graph not found")
-        current_config = json.loads(row["config_json"])
+        current_config = load_graph_config(row)
         try:
             config = apply_config_patch(current_config, body["config"])
         except ConfigValidationError as exc:
@@ -122,7 +127,7 @@ def _graph_summary(db_path: str, row: dict, *, include_views: bool = False) -> d
     response: dict[str, Any] = {
         "id": row["id"],
         "name": row["name"],
-        "config": json.loads(row["config_json"]),
+        "config": load_graph_config(row),
         "recordCount": record_count,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
