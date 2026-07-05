@@ -25,12 +25,13 @@ import {
   spikeBadge,
   topicPanelTopics,
   topicLabel,
-  trendSparklinePath,
+  trendSparklineParts,
   updateFilters,
   updateTopicPanel,
   visibleRecords,
   viewSearchParams,
 } from "./uiState.js";
+import { formatCount, formatCountLabel } from "./formatters.js";
 
 const els = {
   title: document.querySelector("#viewTitle"),
@@ -81,6 +82,7 @@ const runtime = {
   recordsSignature: "",
   listSignature: "",
   trends: new Map(),
+  trendBucket: null,
   trendsStatus: "idle",
   facetField: "",
   facetStatus: "idle",
@@ -123,7 +125,7 @@ async function loadArtifact(graphId, viewId, options = {}) {
   renderLoading("Loading records...");
   const recordCount = await fetchViewRecordCount(graphId, viewId);
   if (runtime.loadToken === loadToken && recordCount !== null) {
-    renderLoading(`Loading ${recordCount} records...`);
+    renderLoading(`Loading ${formatCountLabel(recordCount, "record")}...`);
   }
   const response = await fetch(
     `/api/graphs/${encodeURIComponent(graphId)}/views/${encodeURIComponent(viewId)}/artifact`,
@@ -141,7 +143,7 @@ async function loadArtifact(graphId, viewId, options = {}) {
     return;
   }
   const artifact = await response.json();
-  renderLoading(`Loading ${artifact.data?.length ?? 0} records...`);
+  renderLoading(`Loading ${formatCountLabel(artifact.data?.length ?? 0, "record")}...`);
   runtime.state = buildViewState(artifact, options);
   if (options.selectedRecordId) {
     runtime.state = selectRecord(runtime.state, options.selectedRecordId);
@@ -153,6 +155,7 @@ async function loadArtifact(graphId, viewId, options = {}) {
   runtime.recordsSignature = "";
   runtime.listSignature = "";
   runtime.trends = new Map();
+  runtime.trendBucket = null;
   runtime.trendsStatus = "idle";
   runtime.facetField = "";
   runtime.facetStatus = "idle";
@@ -162,6 +165,7 @@ async function loadArtifact(graphId, viewId, options = {}) {
   render({ dataChanged: true });
   runtime.loadToken = null;
   if (runtime.state.selectedTopicId !== null) {
+    scrollSelectedTopicIntoView();
     scheduleMapUpdate();
     requestAnimationFrame(() => fitSelectedTopic());
   }
@@ -205,14 +209,14 @@ async function renderPicker() {
       (graph) => `
         <article class="picker-card">
           <h2>${escapeHtml(graph.name)}</h2>
-          <p>${graph.recordCount ?? 0} records</p>
+          <p>${formatCountLabel(graph.recordCount ?? 0, "record")}</p>
           <div class="picker-views">
             ${(graph.views || [])
               .map(
                 (view) => `
                   <a class="picker-row" href="/?graphId=${encodeURIComponent(graph.id)}&viewId=${encodeURIComponent(view.id)}">
                     <strong>${escapeHtml(view.name)}</strong>
-                    <span>${escapeHtml(view.description || "No description")} · ${view.recordCount} records</span>
+                    <span>${escapeHtml(view.description || "No description")} · ${formatCountLabel(view.recordCount, "record")}</span>
                   </a>
                 `,
               )
@@ -290,7 +294,12 @@ function bindEvents() {
 }
 
 function render(options = {}) {
-  const { dataChanged = false, selectionOnly = false, listPageChanged = false } = options;
+  const {
+    dataChanged = false,
+    selectionOnly = false,
+    listPageChanged = false,
+    scrollSelectedTopic = false,
+  } = options;
   const state = runtime.state;
   if (!state) return;
   els.picker.hidden = true;
@@ -305,9 +314,9 @@ function render(options = {}) {
   els.title.textContent = "Data Graph";
   els.subtitle.textContent = `${state.artifact.graphId} · ${state.artifact.viewId}`;
   els.stats.innerHTML = `
-    <span>${records.length} visible records</span>
-    <span>${state.topics.length} topics</span>
-    <span>${state.artifact.noise.noiseCount} noise</span>
+    <span>${formatCountLabel(records.length, "visible record")}</span>
+    <span>${formatCountLabel(state.topics.length, "topic")}</span>
+    <span>${formatCountLabel(state.artifact.noise.noiseCount, "noise record")}</span>
   `;
   renderWarnings(state);
   renderProvenance(state);
@@ -316,6 +325,9 @@ function render(options = {}) {
     updateTopicSelectionClasses(state);
   } else {
     renderTopics(state, records);
+  }
+  if (scrollSelectedTopic) {
+    scrollSelectedTopicIntoView();
   }
   renderInspector(state, records);
   if (selectionOnly) {
@@ -346,7 +358,7 @@ function syncControls(state) {
   els.topicFilter.innerHTML = `<option value="">All topics</option>${state.topics
     .map(
       (topic) =>
-        `<option value="${topic.clusterId}">${escapeHtml(topicLabel(topic))} (${topic.size})</option>`,
+        `<option value="${topic.clusterId}">${escapeHtml(topicLabel(topic))} (${formatCount(topic.size)})</option>`,
     )
     .join("")}`;
   els.topicFilter.value =
@@ -373,7 +385,7 @@ function renderTopics(state, records) {
           <span class="topic-swatch" style="background:${clusterColor(topic.clusterId)}"></span>
           <span class="topic-main">
             <strong>${escapeHtml(topicLabel(topic))}</strong>
-            <small>${visibleCount}/${topic.size} visible · mean p ${formatNumber(topic.meanProbability)}</small>
+            <small>${formatCount(visibleCount)}/${formatCount(topic.size)} visible · mean p ${formatNumber(topic.meanProbability)}</small>
             ${sparkline}
             ${topic.summary ? `<span>${escapeHtml(topic.summary)}</span>` : ""}
             ${topic.coherent === false ? `<em>Low coherence</em>` : ""}
@@ -416,8 +428,8 @@ function renderInspector(state, records) {
     ${selectedTopic.summary ? `<p class="wrap-text">${escapeHtml(selectedTopic.summary)}</p>` : ""}
     <dl>
       <dt>Coherence</dt><dd>${selectedTopic.coherent === false ? "Low" : "Normal"}</dd>
-      <dt>Visible records</dt><dd>${selectedRecords.length}</dd>
-      <dt>Total records</dt><dd>${selectedTopic.size}</dd>
+      <dt>Visible records</dt><dd>${formatCount(selectedRecords.length)}</dd>
+      <dt>Total records</dt><dd>${formatCount(selectedTopic.size)}</dd>
       <dt>Source mix</dt><dd>${formatSourceMix(selectedTopic.sourceMix)}</dd>
     </dl>
     ${renderFacetControls(state, selectedTopic)}
@@ -519,10 +531,10 @@ function renderList(state, records) {
   runtime.listSignature = signature;
   els.listContent.innerHTML = `
     <div class="list-summary">
-      <span>Showing ${windowed.showing} of ${windowed.total}</span>
+      <span>Showing ${formatCount(windowed.showing)} of ${formatCount(windowed.total)}</span>
       ${
         windowed.remaining > 0
-          ? `<button type="button" data-show-more>Show ${Math.min(windowed.remaining, 500)} more</button>`
+          ? `<button type="button" data-show-more>Show ${formatCount(Math.min(windowed.remaining, 500))} more</button>`
           : ""
       }
     </div>
@@ -768,7 +780,7 @@ function hideWorkspace() {
 function selectRecordAndRender(recordId) {
   runtime.state = selectRecord(runtime.state, recordId);
   updateUrl();
-  render({ selectionOnly: true });
+  render({ selectionOnly: true, scrollSelectedTopic: true });
 }
 
 function renderLoading(message) {
@@ -819,13 +831,16 @@ function renderProvenance(state) {
   ].filter(([, value]) => value);
   els.provenance.innerHTML = `
     <span>Runs</span>
-    ${items.map(([label, value]) => `<code>${label}:${shortRunId(value)}</code>`).join("")}
+    ${items.map(([label, value]) => renderRunChip(label, value)).join("")}
     ${
       state.artifact.representation === "summary"
-        ? `<span class="representation-pill">summary representation</span>${refs.summarizeRunId ? `<code>summary:${shortRunId(refs.summarizeRunId)}</code>` : ""}`
+        ? `<span class="representation-pill">summary representation</span>${refs.summarizeRunId ? renderRunChip("summary", refs.summarizeRunId) : ""}`
         : `<span class="representation-pill">raw representation</span>`
     }
   `;
+  els.provenance.querySelectorAll("[data-copy-run-id]").forEach((button) => {
+    button.addEventListener("click", () => copyRunId(button));
+  });
 }
 
 async function fetchTrendsOnce() {
@@ -842,11 +857,13 @@ async function fetchTrendsOnce() {
     }
     if (!response.ok) throw new Error(`Trend request failed with ${response.status}`);
     const body = await response.json();
+    runtime.trendBucket = body.bucket || null;
     runtime.trends = new Map(
       (body.series || []).map((series) => [series.clusterId, series.buckets || []]),
     );
     runtime.trendsStatus = "loaded";
     renderTopics(runtime.state, runtime.visibleRecords);
+    scrollSelectedTopicIntoView();
     renderInspector(runtime.state, runtime.visibleRecords);
   } catch {
     runtime.trendsStatus = "error";
@@ -857,12 +874,22 @@ function renderSparkline(buckets, size) {
   if (!buckets?.length) return "";
   const width = size === "large" ? 220 : 96;
   const height = size === "large" ? 52 : 24;
-  const path = trendSparklinePath(buckets, { width, height, padding: 3 });
-  if (!path) return "";
+  const parts = trendSparklineParts(buckets, {
+    width,
+    height,
+    padding: 3,
+    bucket: runtime.trendBucket,
+    maxRecordTimestamp: runtime.state?.maxRecordTimestamp,
+  });
+  if (!parts.linePath) return "";
+  const fillPath = `${parts.linePath}${parts.partialPath ? ` ${parts.partialPath.replace(/^M /, "L ")}` : ""}`;
   return `
     <svg class="sparkline sparkline-${size}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Topic trend sparkline">
-      <path class="sparkline-fill" d="${escapeAttr(path)} L ${width - 3} ${height - 3} L 3 ${height - 3} Z"></path>
-      <path class="sparkline-line" d="${escapeAttr(path)}"></path>
+      <title>${escapeHtml(parts.title)}</title>
+      <path class="sparkline-fill" d="${escapeAttr(fillPath)} L ${width - 3} ${height - 3} L 3 ${height - 3} Z"></path>
+      <path class="sparkline-line" d="${escapeAttr(parts.linePath)}"></path>
+      ${parts.partialPath ? `<path class="sparkline-partial" d="${escapeAttr(parts.partialPath)}"></path>` : ""}
+      ${parts.partialPoint ? `<circle class="sparkline-partial-point" cx="${roundSvg(parts.partialPoint.x)}" cy="${roundSvg(parts.partialPoint.y)}" r="2.75"></circle>` : ""}
     </svg>
   `;
 }
@@ -923,7 +950,7 @@ function facetBody(topic) {
             <div class="facet-row">
               <span>${escapeHtml(facet.value)}</span>
               <div><i style="width:${Math.max(4, (facet.count / max) * 100)}%"></i></div>
-              <strong>${facet.count}</strong>
+              <strong>${formatCount(facet.count)}</strong>
             </div>
           `,
         )
@@ -1010,6 +1037,19 @@ function updateTopicSelectionClasses(state) {
   });
 }
 
+function scrollSelectedTopicIntoView() {
+  const topicId = runtime.state?.selectedTopicId;
+  if (topicId === null || topicId === undefined) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    const selected = els.topicList.querySelector(
+      `[data-topic-id="${escapeCssIdentifier(String(topicId))}"]`,
+    );
+    selected?.scrollIntoView({ block: "nearest" });
+  });
+}
+
 function updateListSelectionClasses(state) {
   els.listContent.querySelectorAll("[data-record-id]").forEach((row) => {
     const record = state.recordById.get(row.dataset.recordId);
@@ -1033,7 +1073,7 @@ function renderError(title, message) {
 
 function formatSourceMix(sourceMix = {}) {
   return Object.entries(sourceMix)
-    .map(([source, count]) => `${escapeHtml(source)} ${count}`)
+    .map(([source, count]) => `${escapeHtml(source)} ${formatCount(count)}`)
     .join(" · ");
 }
 
@@ -1043,6 +1083,44 @@ function formatNumber(value) {
 
 function shortRunId(value) {
   return String(value ?? "").slice(-6);
+}
+
+function renderRunChip(label, value) {
+  const runId = String(value);
+  return `
+    <button class="run-chip" type="button" data-copy-run-id="${escapeAttr(runId)}" title="${escapeAttr(runId)}">
+      <code>${escapeHtml(label)}:${escapeHtml(shortRunId(runId))}</code>
+      <span class="copy-status" aria-hidden="true">copied</span>
+    </button>
+  `;
+}
+
+async function copyRunId(button) {
+  const runId = button.dataset.copyRunId;
+  if (!runId) return;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+    await navigator.clipboard.writeText(runId);
+    button.classList.add("copied");
+    button.setAttribute("aria-label", "Copied full run id");
+    window.setTimeout(() => {
+      button.classList.remove("copied");
+      button.removeAttribute("aria-label");
+    }, 1200);
+  } catch {
+    button.classList.add("copy-unavailable");
+  }
+}
+
+function roundSvg(value) {
+  return String(Math.round(value * 100) / 100);
+}
+
+function escapeCssIdentifier(value) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(value);
+  }
+  return value.replace(/["\\]/g, "\\$&");
 }
 
 function formatOptionalNumber(value) {

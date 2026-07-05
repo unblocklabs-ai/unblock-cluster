@@ -16,7 +16,9 @@ import {
   showMoreListRecords,
   spikeBadge,
   topicPanelTopics,
+  trendSparklinePartialPath,
   trendSparklinePath,
+  trendSparklineTitle,
   updateFilters,
   updateTopicPanel,
   visibleRecords,
@@ -313,6 +315,106 @@ test("builds sparkline paths for empty, single, flat, and spike series", () => {
       { width: 10, height: 6, padding: 1 },
     ),
     "M 1 5 L 5 1 L 9 4.5",
+  );
+});
+
+test("trims leading zero buckets from sparkline presentation", () => {
+  assert.equal(
+    trendSparklinePath(
+      [
+        { bucketStart: "2025-05-04", count: 0 },
+        { bucketStart: "2025-05-11", count: 0 },
+        { bucketStart: "2025-05-18", count: 5 },
+        { bucketStart: "2025-05-25", count: 10 },
+      ],
+      { width: 10, height: 6, padding: 1 },
+    ),
+    "M 1 5 L 9 1",
+  );
+  assert.equal(
+    trendSparklinePath(
+      [
+        { bucketStart: "2025-05-04", count: 4 },
+        { bucketStart: "2025-05-11", count: 8 },
+      ],
+      { width: 10, height: 6, padding: 1 },
+    ),
+    "M 1 5 L 9 1",
+  );
+});
+
+test("keeps all-zero and single-nonzero sparklines flat", () => {
+  assert.equal(
+    trendSparklinePath(
+      [
+        { bucketStart: "2025-05-04", count: 0 },
+        { bucketStart: "2025-05-11", count: 0 },
+        { bucketStart: "2025-05-18", count: 0 },
+      ],
+      { width: 10, height: 6, padding: 1 },
+    ),
+    "M 1 3 L 5 3 L 9 3",
+  );
+  assert.equal(
+    trendSparklinePath(
+      [
+        { bucketStart: "2025-05-04", count: 0 },
+        { bucketStart: "2025-05-11", count: 7 },
+      ],
+      { width: 10, height: 6, padding: 1 },
+    ),
+    "M 1 3 L 9 3",
+  );
+});
+
+test("derives sparkline y-domain from trimmed values", () => {
+  assert.equal(
+    trendSparklinePath(
+      [
+        { bucketStart: "2025-05-04", count: 0 },
+        { bucketStart: "2025-05-11", count: 9 },
+        { bucketStart: "2025-05-18", count: 10 },
+      ],
+      { width: 10, height: 6, padding: 1 },
+    ),
+    "M 1 5 L 9 1",
+  );
+});
+
+test("marks incomplete final buckets as a separate partial segment", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 2 },
+    { bucketStart: "2025-05-11", count: 10 },
+    { bucketStart: "2025-05-18", count: 4 },
+  ];
+  const options = {
+    width: 10,
+    height: 6,
+    padding: 1,
+    bucket: "week",
+    maxRecordTimestamp: "2025-05-20T12:00:00Z",
+  };
+  assert.equal(trendSparklinePath(buckets, options), "M 1 5 L 5 1");
+  assert.equal(trendSparklinePartialPath(buckets, options), "M 5 1 L 9 4");
+  assert.equal(
+    trendSparklinePartialPath(buckets, {
+      ...options,
+      maxRecordTimestamp: "2025-05-25T00:00:00Z",
+    }),
+    "",
+  );
+});
+
+test("builds sparkline title from the trimmed range", () => {
+  assert.equal(
+    trendSparklineTitle(
+      [
+        { bucketStart: "2025-05-04", count: 0 },
+        { bucketStart: "2025-05-11", count: 32 },
+        { bucketStart: "2025-05-18", count: 8 },
+      ],
+    ),
+    "May 11 – May 18 · peak 32 (May 11)",
   );
 });
 

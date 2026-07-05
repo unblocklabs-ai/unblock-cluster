@@ -42,10 +42,11 @@ export function buildViewState(artifact, options = {}) {
   const timestamps = (artifact?.data || [])
     .map((record) => Date.parse(record.timestamp))
     .filter((value) => Number.isFinite(value));
+  const maxRecordTimestamp = timestamps.length ? Math.max(...timestamps) : null;
   const timeExtent = timestamps.length
     ? {
         min: new Date(Math.min(...timestamps)).toISOString().slice(0, 10),
-        max: new Date(Math.max(...timestamps)).toISOString().slice(0, 10),
+        max: new Date(maxRecordTimestamp).toISOString().slice(0, 10),
       }
     : { min: "", max: "" };
   return {
@@ -55,6 +56,7 @@ export function buildViewState(artifact, options = {}) {
     recordById,
     sourceTypes,
     timeExtent,
+    maxRecordTimestamp,
     filters: {
       query: options.query || "",
       topicId: normalizeTopicId(options.topicId),
@@ -249,30 +251,40 @@ export function spikeBadge(topic, threshold = 3) {
 }
 
 export function trendSparklinePath(buckets = [], options = {}) {
-  const width = positiveNumber(options.width, 96);
-  const height = positiveNumber(options.height, 24);
-  const padding = Math.max(0, Number(options.padding ?? 2));
-  const values = buckets
-    .map((bucket) => Number(bucket.count ?? 0))
-    .filter((value) => Number.isFinite(value));
-  if (!values.length) return "";
-  if (values.length === 1) {
-    const y = roundPath(height / 2);
-    return `M ${roundPath(padding)} ${y} L ${roundPath(width - padding)} ${y}`;
-  }
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const span = max - min;
-  const usableWidth = Math.max(1, width - padding * 2);
-  const usableHeight = Math.max(1, height - padding * 2);
-  return values
-    .map((value, index) => {
-      const x = padding + (usableWidth * index) / (values.length - 1);
-      const ratio = span === 0 ? 0.5 : (value - min) / span;
-      const y = padding + usableHeight * (1 - ratio);
-      return `${index === 0 ? "M" : "L"} ${roundPath(x)} ${roundPath(y)}`;
-    })
-    .join(" ");
+  const parts = trendSparklineParts(buckets, options);
+  return parts.linePath;
+}
+
+export function trendSparklinePartialPath(buckets = [], options = {}) {
+  const parts = trendSparklineParts(buckets, options);
+  return parts.partialPath;
+}
+
+export function trendSparklineTitle(buckets = [], options = {}) {
+  const prepared = prepareSparkline(buckets, options);
+  if (!prepared.buckets.length) return "";
+  const peak = prepared.buckets.reduce((best, bucket) =>
+    bucket.count > best.count ? bucket : best,
+  );
+  const first = prepared.buckets[0];
+  const last = prepared.buckets[prepared.buckets.length - 1];
+  return `${formatBucketLabel(first.bucketStart)} – ${formatBucketLabel(last.bucketStart)} · peak ${formatInteger(peak.count)} (${formatBucketLabel(peak.bucketStart)})`;
+}
+
+export function trendSparklineParts(buckets = [], options = {}) {
+  const prepared = prepareSparkline(buckets, options);
+  const points = prepared.points;
+  if (!points.length) return { linePath: "", partialPath: "", title: "" };
+  const partial = prepared.finalBucketPartial && points.length > 1;
+  const linePoints = partial ? points.slice(0, -1) : points;
+  const linePath = pointsToPath(linePoints);
+  const partialPath = partial ? pointsToPath(points.slice(-2)) : "";
+  return {
+    linePath,
+    partialPath,
+    title: trendSparklineTitle(buckets, options),
+    partialPoint: prepared.finalBucketPartial ? points[points.length - 1] : null,
+  };
 }
 
 export function datePresetFilters(timeExtent, preset) {
@@ -340,6 +352,88 @@ function normalizeTopicSort(value) {
 
 function normalizeSearch(value) {
   return String(value ?? "").trim();
+}
+
+function prepareSparkline(buckets = [], options = {}) {
+  const width = positiveNumber(options.width, 96);
+  const height = positiveNumber(options.height, 24);
+  const padding = Math.max(0, Number(options.padding ?? 2));
+  const finiteBuckets = buckets
+    .map((bucket) => ({
+      ...bucket,
+      count: Number(bucket.count ?? 0),
+    }))
+    .filter((bucket) => Number.isFinite(bucket.count));
+  if (!finiteBuckets.length) {
+    return { buckets: [], points: [], finalBucketPartial: false };
+  }
+  const firstNonzero = finiteBuckets.findIndex((bucket) => bucket.count > 0);
+  const trimmed = firstNonzero === -1 ? finiteBuckets : finiteBuckets.slice(firstNonzero);
+  const values = trimmed.map((bucket) => bucket.count);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min;
+  const usableWidth = Math.max(1, width - padding * 2);
+  const usableHeight = Math.max(1, height - padding * 2);
+  const points =
+    values.length === 1
+      ? [
+          { x: padding, y: height / 2 },
+          { x: width - padding, y: height / 2 },
+        ]
+      : values.map((value, index) => {
+          const x = padding + (usableWidth * index) / (values.length - 1);
+          const ratio = span === 0 ? 0.5 : (value - min) / span;
+          const y = padding + usableHeight * (1 - ratio);
+          return { x, y };
+        });
+  return {
+    buckets: trimmed,
+    points,
+    finalBucketPartial: isFinalBucketPartial(trimmed[trimmed.length - 1], options),
+  };
+}
+
+function pointsToPath(points) {
+  if (!points.length) return "";
+  return points
+    .map(
+      (point, index) =>
+        `${index === 0 ? "M" : "L"} ${roundPath(point.x)} ${roundPath(point.y)}`,
+    )
+    .join(" ");
+}
+
+function isFinalBucketPartial(bucket, options) {
+  if (!bucket?.bucketStart || !options.maxRecordTimestamp || !options.bucket) return false;
+  const start = parseDateOnly(bucket.bucketStart);
+  const maxTimestamp = new Date(options.maxRecordTimestamp);
+  if (!start || Number.isNaN(maxTimestamp.getTime())) return false;
+  const end = new Date(start);
+  if (options.bucket === "day") {
+    end.setUTCDate(end.getUTCDate() + 1);
+  } else if (options.bucket === "week") {
+    end.setUTCDate(end.getUTCDate() + 7);
+  } else if (options.bucket === "month") {
+    end.setUTCMonth(end.getUTCMonth() + 1);
+  } else {
+    return false;
+  }
+  return end.getTime() > maxTimestamp.getTime();
+}
+
+function formatBucketLabel(value) {
+  const date = parseDateOnly(value);
+  if (!date) return String(value || "");
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
+function formatInteger(value) {
+  return Math.trunc(Number(value) || 0).toLocaleString("en-US");
 }
 
 function positiveNumber(value, fallback) {
