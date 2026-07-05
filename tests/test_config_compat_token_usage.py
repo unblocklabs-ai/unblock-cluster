@@ -15,7 +15,7 @@ from datagraph.core.summarization import SummaryResult
 from datagraph.core.vectors import normalize_l2
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
+from tests.helpers import test_settings
 
 
 class UsageEmbeddingProvider:
@@ -73,7 +73,7 @@ class UsageLabelProvider:
 
 
 def test_legacy_config_without_summarization_hydrates_for_summarize(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path / "data", port=0)
+    settings = test_settings(tmp_path / "data")
     graph_id = "grf_legacy_summarize"
     legacy_config = {
         "embedding": {
@@ -103,7 +103,7 @@ def test_legacy_config_without_summarization_hydrates_for_summarize(tmp_path: Pa
 
 
 def test_legacy_config_without_cluster_min_dist_hydrates_for_cluster(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path / "data", port=0)
+    settings = test_settings(tmp_path / "data")
     graph_id = "grf_legacy_cluster"
     legacy_config = {
         "embedding": {
@@ -142,7 +142,7 @@ def test_legacy_config_without_cluster_min_dist_hydrates_for_cluster(tmp_path: P
 def test_unknown_legacy_config_keys_are_dropped_on_reads_but_patch_is_strict(
     tmp_path: Path,
 ) -> None:
-    settings = Settings(data_dir=tmp_path / "data", port=0)
+    settings = test_settings(tmp_path / "data")
     graph_id = "grf_legacy_unknown"
     legacy_config = {
         "legacyTop": True,
@@ -184,7 +184,7 @@ def test_no_direct_config_json_loads_outside_shared_loader() -> None:
 
 
 def test_token_usage_in_summarize_embed_label_and_report(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path / "data", port=0)
+    settings = test_settings(tmp_path / "data")
     embedding_provider = UsageEmbeddingProvider(dimensions=8, prompt_tokens=123)
     with TestClient(
         create_app(
@@ -232,7 +232,7 @@ def test_token_usage_in_summarize_embed_label_and_report(tmp_path: Path) -> None
 
 
 def test_plain_mock_providers_emit_zero_token_usage(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path / "data", port=0)
+    settings = test_settings(tmp_path / "data")
     with TestClient(
         create_app(
             settings,
@@ -347,7 +347,7 @@ def _poll_run(
         last = response.json()
         if last["status"] in {"succeeded", "failed", "cancelled"}:
             return last
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise AssertionError(f"run did not finish; last={last}")
 
 

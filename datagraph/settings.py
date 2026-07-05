@@ -14,6 +14,8 @@ class Settings:
     openai_api_key: str | None = None
     read_only: bool = False
     dist_dir: Path = DEFAULT_DIST_DIR
+    worker_idle_timeout: float = 1.0
+    inline_cpu_runs: bool = False
 
     @property
     def db_path(self) -> Path:

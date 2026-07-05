@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
@@ -14,9 +15,9 @@ from datagraph.db import connect
 from datagraph.main import create_app
 from datagraph.runs import cluster as cluster_mod
 from datagraph.runs.cluster import _clustering_space
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
-from tests.test_phase3 import (
+from tests.helpers import test_settings
+from tests.test_clustering_layout import (
     StructuredTopicProvider,
     _all_records_view,
     _create_graph,
@@ -27,15 +28,15 @@ from tests.test_phase3 import (
     _poll_run,
     _post_records,
 )
-from tests.test_phase4 import ScriptedLabelProvider
-from tests.test_phase6 import _enqueue_trend, _post_evidence
+from tests.test_evidence import _enqueue_trend, _post_evidence
+from tests.test_labeling import ScriptedLabelProvider
 
 
 def test_cluster_min_dist_default_validation_and_umap_pass_through(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
-    with TestClient(create_app(Settings(data_dir=tmp_path / "data", port=0))) as client:
+    with TestClient(create_app(test_settings(tmp_path / "data"))) as client:
         valid = client.post(
             "/api/graphs",
             json={
@@ -88,6 +89,7 @@ def test_cluster_min_dist_default_validation_and_umap_pass_through(
     assert captured["min_dist"] == 0.25
 
 
+@pytest.mark.slow
 def test_focus_recluster_lineage_defaults_and_drill_down_labeling(tmp_path: Path) -> None:
     records = generate_records(5000, 42)[:600]
     label_provider = ScriptedLabelProvider()
@@ -180,8 +182,9 @@ def test_focus_recluster_lineage_defaults_and_drill_down_labeling(tmp_path: Path
         assert any(topic["label"] is not None for topic in focused_topics.json()["topics"])
 
 
+@pytest.mark.slow
 def test_topics_and_evidence_facet_by_counts_and_validation(tmp_path: Path) -> None:
-    records = generate_records(5000, 42)[:700]
+    records = generate_records(5000, 42)[:600]
     with _phase11_client(tmp_path, records, ScriptedLabelProvider()) as client:
         graph = _create_graph(client)
         graph_id = graph["id"]
@@ -299,7 +302,9 @@ def _phase11_client(
     provider = StructuredTopicProvider(text_to_topic)
     return TestClient(
         create_app(
-            Settings(data_dir=tmp_path / f"data-{time.monotonic_ns()}", port=0),
+            test_settings(
+                tmp_path / f"data-{time.monotonic_ns()}",
+            ),
             embedding_provider_factory=lambda _config: provider,
             label_provider_factory=lambda _config: label_provider,
         )

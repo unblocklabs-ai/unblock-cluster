@@ -46,6 +46,8 @@ class RunExecutor:
         openai_api_key: str | None = None,
         clock: ClockFunc | None = None,
         sleep: SleepFunc | None = None,
+        idle_timeout: float = 1.0,
+        inline_cpu: bool = False,
     ) -> None:
         self.db_path = Path(db_path)
         self._registry: dict[str, RunSpec] = {
@@ -64,7 +66,9 @@ class RunExecutor:
         self._openai_api_key = openai_api_key
         self._clock = clock or time.monotonic
         self._sleep = sleep or asyncio.sleep
-        self._process_pool = ProcessPoolExecutor(max_workers=1)
+        self._idle_timeout = idle_timeout
+        self._inline_cpu = inline_cpu
+        self._process_pool = None if inline_cpu else ProcessPoolExecutor(max_workers=1)
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
         self._worker_task: asyncio.Task[None] | None = None
@@ -81,7 +85,8 @@ class RunExecutor:
             self._worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker_task
-        self._process_pool.shutdown(wait=True, cancel_futures=True)
+        if self._process_pool is not None:
+            self._process_pool.shutdown(wait=True, cancel_futures=True)
 
     def recover_interrupted(self) -> None:
         completed = now_iso()
@@ -215,7 +220,7 @@ class RunExecutor:
             if row is None:
                 self._wake_event.clear()
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(self._wake_event.wait(), timeout=1.0)
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=self._idle_timeout)
                 continue
             await self._run_one(row)
 
@@ -291,7 +296,13 @@ class RunExecutor:
     async def _run_cpu(self, row: dict, params: dict[str, Any]) -> None:
         run_id = row["id"]
         self._update_progress(run_id, {"state": "running", "cpu": True})
+        if self._inline_cpu:
+            stats = self._run_cpu_inline(row, params)
+            self._update_stats(run_id, stats)
+            return
+
         loop = asyncio.get_running_loop()
+        assert self._process_pool is not None
         if row["type"] == "cluster":
             stats = await loop.run_in_executor(
                 self._process_pool,
@@ -320,6 +331,31 @@ class RunExecutor:
         else:
             stats = await loop.run_in_executor(self._process_pool, _cpu_noop, params)
         self._update_stats(run_id, stats)
+
+    def _run_cpu_inline(self, row: dict, params: dict[str, Any]) -> dict[str, Any]:
+        run_id = row["id"]
+        if row["type"] == "cluster":
+            return execute_cluster_job(
+                str(self.db_path),
+                run_id,
+                row["graph_id"],
+                row["view_id"],
+                params["embeddingRunId"],
+                params["cluster"],
+                params.get("setDefault", True),
+                params.get("focus"),
+            )
+        if row["type"] == "layout":
+            return execute_layout_job(
+                str(self.db_path),
+                run_id,
+                row["graph_id"],
+                row["view_id"],
+                params["embeddingRunId"],
+                params["layout"],
+                params.get("setDefault", True),
+            )
+        return _cpu_noop(params)
 
     async def _run_embed(
         self,

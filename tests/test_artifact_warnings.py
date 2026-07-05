@@ -4,15 +4,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
 from datagraph.db import connect
 from datagraph.main import create_app
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
-from tests.test_phase3 import StructuredTopicProvider
-from tests.test_phase4 import ScriptedLabelProvider
+from tests.helpers import test_settings
+from tests.test_clustering_layout import StructuredTopicProvider
+from tests.test_labeling import ScriptedLabelProvider
 
 RUN_KEYS = {
     "id",
@@ -31,6 +32,7 @@ RUN_KEYS = {
 }
 
 
+@pytest.mark.slow
 def test_set_default_false_persists_outputs_without_promoting_defaults(tmp_path: Path) -> None:
     records = generate_records(5000, 42)[:180]
     with _phase8_client(tmp_path, records) as client:
@@ -130,6 +132,7 @@ def test_set_default_false_persists_outputs_without_promoting_defaults(tmp_path:
             assert "setDefault" in response.text
 
 
+@pytest.mark.slow
 def test_artifact_and_topics_warn_on_label_and_trend_mismatches(tmp_path: Path) -> None:
     records = generate_records(5000, 42)[:180]
     with _phase8_client(tmp_path, records) as client:
@@ -220,7 +223,7 @@ def _phase8_client(tmp_path: Path, records: list[dict[str, Any]]) -> TestClient:
     label_provider = ScriptedLabelProvider()
     return TestClient(
         create_app(
-            Settings(data_dir=tmp_path / "data", port=0),
+            test_settings(tmp_path / "data"),
             embedding_provider_factory=lambda _config: provider,
             label_provider_factory=lambda _config: label_provider,
         )
@@ -295,7 +298,7 @@ def _poll_run(
         assert set(last) == RUN_KEYS
         if last["status"] in {"succeeded", "failed", "cancelled"}:
             return last
-        time.sleep(0.03)
+        time.sleep(0.01)
     raise AssertionError(f"run did not finish; last={last}")
 
 

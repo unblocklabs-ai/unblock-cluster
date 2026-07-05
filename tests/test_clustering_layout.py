@@ -21,8 +21,8 @@ from datagraph.core.vectors import normalize_l2
 from datagraph.db import connect
 from datagraph.main import create_app
 from datagraph.runs.cluster import effective_hdbscan_params, select_representatives
-from datagraph.settings import Settings
 from scripts.gen_synthetic import generate_records
+from tests.helpers import test_settings
 
 
 class StructuredTopicProvider(MockEmbeddingProvider):
@@ -53,7 +53,7 @@ def _client(tmp_path: Path, provider: Any | None = None) -> TestClient:
     factory = (lambda _config: provider) if provider is not None else None
     return TestClient(
         create_app(
-            Settings(data_dir=tmp_path / "data", port=0),
+            test_settings(tmp_path / "data"),
             embedding_provider_factory=factory,
         )
     )
@@ -143,7 +143,7 @@ def _poll_run(
         last = response.json()
         if last["status"] in {"succeeded", "failed", "cancelled"}:
             return last
-        time.sleep(0.05)
+        time.sleep(0.01)
     raise AssertionError(f"run did not finish; last={last}")
 
 
@@ -167,6 +167,7 @@ def _membership_rows(client: TestClient, run_id: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+@pytest.mark.slow
 def test_planted_structure_cluster_layout_and_read_apis(tmp_path: Path) -> None:
     records = generate_records(5000, 42)[:2000]
     text_config = {
@@ -294,6 +295,7 @@ def test_planted_structure_cluster_layout_and_read_apis(tmp_path: Path) -> None:
         assert outliers["records"]
 
 
+@pytest.mark.slow
 def test_scoped_cluster_missing_embeddings_and_none_space_guard(tmp_path: Path) -> None:
     records = generate_records(5000, 42)[:240]
     text_config = {
@@ -339,9 +341,7 @@ def test_scoped_cluster_missing_embeddings_and_none_space_guard(tmp_path: Path) 
         assert {json.loads(row["normalized_json"])["sourceType"] for row in rows} == {
             "social_comment"
         }
-        refreshed_social = client.get(
-            f"/api/graphs/{graph_id}/views/{social_view['id']}"
-        ).json()
+        refreshed_social = client.get(f"/api/graphs/{graph_id}/views/{social_view['id']}").json()
         assert refreshed_social["defaultEmbeddingRunId"] == embed_run["id"]
         assert refreshed_social["defaultClusterRunId"] == cluster_run_id
 
@@ -433,9 +433,7 @@ def _assert_membership_integrity(
         assert len(reps) <= 20
         member_ids = {row["record_id"] for row in members}
         assert set(reps) <= member_ids
-        high_probability_ids = {
-            row["record_id"] for row in members if row["probability"] >= 0.7
-        }
+        high_probability_ids = {row["record_id"] for row in members if row["probability"] >= 0.7}
         if high_probability_ids:
             assert set(reps) <= high_probability_ids
         source_mix = json.loads(summary["source_mix_json"])

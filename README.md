@@ -536,10 +536,15 @@ artifact reads, and frontend build make no network calls.
 
 ```sh
 .venv/bin/pytest
+.venv/bin/pytest -m "not slow"
 .venv/bin/ruff check .
 npm run check
 npm run build
 ```
+
+The default pytest command runs the full coverage-preserving suite, including
+slow gates. Use `-m "not slow"` for the fast inner-loop tier; CI runs the full
+suite in parallel with `pytest -n auto`.
 
 Manual scale benchmark:
 
