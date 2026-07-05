@@ -13,6 +13,7 @@ from datagraph.api.artifact import router as artifact_router
 from datagraph.api.embeddings import router as embeddings_router
 from datagraph.api.evidence import router as evidence_router
 from datagraph.api.graphs import router as graphs_router
+from datagraph.api.labels import router as labels_router
 from datagraph.api.records import router as records_router
 from datagraph.api.runs import router as runs_router
 from datagraph.api.summarize import router as summarize_router
@@ -102,6 +103,7 @@ def create_app(
     app.include_router(records_router)
     app.include_router(embeddings_router)
     app.include_router(summarize_router)
+    app.include_router(labels_router)
     app.include_router(runs_router)
     app.include_router(views_router)
     app.include_router(evidence_router)

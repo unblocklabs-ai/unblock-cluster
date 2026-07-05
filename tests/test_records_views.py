@@ -136,6 +136,9 @@ def test_graph_config_validation_defaults_and_patch_revalidation(tmp_path: Path)
         assert config["cluster"]["space"]["method"] == "umap"
         assert config["layout"]["nNeighbors"] == 30
         assert config["labeling"]["model"] == "gpt-5.4-mini"
+        assert config["labeling"]["exampleTextLimit"] == 700
+        assert config["labeling"]["promptAppend"] is None
+        assert config["labeling"]["textSource"] == "auto"
         assert config["time"]["bucket"] == "week"
 
         patched = client.patch(
