@@ -1,5 +1,6 @@
 const LIST_PAGE_SIZE = 500;
 const TOPIC_SORTS = new Set(["size", "spike", "name"]);
+export const NOISE_TOPIC_ID = -1;
 
 export function parseViewParams(search = "") {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
@@ -66,6 +67,7 @@ export function buildViewState(artifact, options = {}) {
     },
     selectedTopicId: normalizeNullableTopicId(options.selectedTopicId),
     selectedRecordId: normalizeRecordId(options.selectedRecordId),
+    noiseSampleIds: Array.isArray(options.noiseSampleIds) ? options.noiseSampleIds : [],
     listLimit: normalizeListLimit(options.listLimit),
     topicSort: normalizeTopicSort(options.topicSort),
     topicSearch: normalizeSearch(options.topicSearch),
@@ -91,6 +93,16 @@ export function selectTopic(state, topicId) {
     ...state,
     selectedTopicId: normalizedTopicId === "" ? null : normalizedTopicId,
     selectedRecordId: null,
+    noiseSampleIds: normalizedTopicId === NOISE_TOPIC_ID ? state.noiseSampleIds : [],
+  };
+}
+
+export function selectNoise(state, records = visibleRecords(state), options = {}) {
+  return {
+    ...state,
+    selectedTopicId: NOISE_TOPIC_ID,
+    selectedRecordId: null,
+    noiseSampleIds: sampleNoiseRecordIds(records, options),
   };
 }
 
@@ -157,6 +169,7 @@ export function clearTopicSelection(state) {
     ...state,
     selectedTopicId: null,
     selectedRecordId: null,
+    noiseSampleIds: [],
   };
 }
 
@@ -220,6 +233,20 @@ export function representativeRecords(topic, records) {
   return (topic?.representativeRecordIds || [])
     .map((id) => byId.get(id))
     .filter(Boolean);
+}
+
+export function noiseRecords(records) {
+  return records.filter((record) => record.isNoise || record.clusterId === NOISE_TOPIC_ID);
+}
+
+export function sampleNoiseRecordIds(records, options = {}) {
+  const limit = positiveInteger(options.limit, 20);
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  return noiseRecords(records)
+    .map((record) => ({ id: record.id, score: Number(rng()) }))
+    .sort((left, right) => left.score - right.score || left.id.localeCompare(right.id))
+    .slice(0, limit)
+    .map((entry) => entry.id);
 }
 
 export function clusterColor(clusterId) {
@@ -309,6 +336,7 @@ export function applyDatePreset(state, preset) {
 
 export function selectedTopicExtentRecords(state, records = visibleRecords(state)) {
   if (state.selectedTopicId === null || state.selectedTopicId === undefined) return records;
+  if (state.selectedTopicId === NOISE_TOPIC_ID) return noiseRecords(records);
   return records.filter((record) => record.clusterId === state.selectedTopicId);
 }
 
@@ -344,6 +372,11 @@ function normalizeRecordId(value) {
 function normalizeListLimit(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : LIST_PAGE_SIZE;
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
 function normalizeTopicSort(value) {

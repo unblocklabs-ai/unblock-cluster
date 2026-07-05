@@ -16,8 +16,11 @@ import {
   clearTopicSelection,
   clusterColor,
   listWindow,
+  NOISE_TOPIC_ID,
+  noiseRecords,
   parseViewParams,
   representativeRecords,
+  selectNoise,
   selectRecord,
   selectTopic,
   selectedTopicExtentRecords,
@@ -147,6 +150,8 @@ async function loadArtifact(graphId, viewId, options = {}) {
   runtime.state = buildViewState(artifact, options);
   if (options.selectedRecordId) {
     runtime.state = selectRecord(runtime.state, options.selectedRecordId);
+  } else if (runtime.state.selectedTopicId === NOISE_TOPIC_ID) {
+    runtime.state = selectNoise(runtime.state, runtime.state.artifact.data);
   }
   runtime.initialFitDone = false;
   runtime.recordDetails.clear();
@@ -375,7 +380,9 @@ function syncControls(state) {
 }
 
 function renderTopics(state, records) {
-  els.topicList.innerHTML = topicPanelTopics(state, records)
+  const visibleNoise = noiseRecords(records);
+  const totalNoise = state.artifact.noise?.noiseCount ?? noiseRecords(state.artifact.data).length;
+  const topics = topicPanelTopics(state, records)
     .map(({ topic, visibleCount, selected }) => {
       const badge = spikeBadge(topic);
       const series = runtime.trends.get(topic.clusterId);
@@ -396,6 +403,16 @@ function renderTopics(state, records) {
       `;
     })
     .join("");
+  els.topicList.innerHTML = `${topics}
+    <button class="topic noise-topic ${state.selectedTopicId === NOISE_TOPIC_ID ? "selected" : ""}" type="button" data-noise-topic>
+      <span class="topic-swatch noise-swatch"></span>
+      <span class="topic-main">
+        <strong>Noise</strong>
+        <small>${formatCount(visibleNoise.length)}/${formatCount(totalNoise)} visible</small>
+        <span class="source-mix">Random sample for noise review</span>
+      </span>
+    </button>
+  `;
   els.topicList.querySelectorAll("[data-topic-id]").forEach((button) => {
     button.addEventListener("click", () => {
       runtime.state = selectTopic(runtime.state, button.dataset.topicId);
@@ -404,11 +421,21 @@ function renderTopics(state, records) {
       fitSelectedTopic();
     });
   });
+  els.topicList.querySelector("[data-noise-topic]")?.addEventListener("click", () => {
+    runtime.state = selectNoise(runtime.state, runtime.visibleRecords);
+    updateUrl();
+    render({ selectionOnly: true });
+    fitSelectedTopic();
+  });
 }
 
 function renderInspector(state, records) {
   if (state.selectedRecordId) {
     renderRecordInspector(state);
+    return;
+  }
+  if (state.selectedTopicId === NOISE_TOPIC_ID) {
+    renderNoiseInspector(state, records);
     return;
   }
   const selectedTopic = state.topicById.get(state.selectedTopicId);
@@ -435,19 +462,7 @@ function renderInspector(state, records) {
     ${renderFacetControls(state, selectedTopic)}
     <h3>Representatives</h3>
     <div class="representatives">
-      ${reps
-        .map((record) => {
-          const recordUrl = safeRecordUrl(record.recordUrl);
-          return `
-            <article>
-              <strong>${escapeHtml(record.title || record.recordId)}</strong>
-              <p>${escapeHtml(record.customerText || "")}</p>
-              <button type="button" data-record-id="${escapeAttr(record.id)}">Inspect record</button>
-              ${recordUrl ? `<a href="${escapeAttr(recordUrl)}" rel="noreferrer" target="_blank">Open source</a>` : ""}
-            </article>
-          `;
-        })
-        .join("")}
+      ${reps.map(renderRecordCard).join("")}
     </div>
   `;
   els.details.querySelectorAll("[data-record-id]").forEach((button) => {
@@ -463,6 +478,56 @@ function renderInspector(state, records) {
   });
 }
 
+function renderNoiseInspector(state, records) {
+  const visibleNoise = noiseRecords(records);
+  const totalNoise = state.artifact.noise?.noiseCount ?? noiseRecords(state.artifact.data).length;
+  const noiseById = new Map(visibleNoise.map((record) => [record.id, record]));
+  const sample = (state.noiseSampleIds || [])
+    .map((id) => noiseById.get(id))
+    .filter(Boolean);
+  els.emptyState.hidden = true;
+  els.details.hidden = false;
+  els.details.innerHTML = `
+    <h2>Noise</h2>
+    <p class="wrap-text">Random sample of records outside the current clusters.</p>
+    <dl>
+      <dt>Visible noise records</dt><dd>${formatCount(visibleNoise.length)}</dd>
+      <dt>Total noise records</dt><dd>${formatCount(totalNoise)}</dd>
+    </dl>
+    <div class="inspector-actions">
+      <button type="button" data-resample-noise>Resample</button>
+    </div>
+    <h3>Sampled Records</h3>
+    <div class="representatives">
+      ${
+        sample.length
+          ? sample.map(renderRecordCard).join("")
+          : `<p class="muted">No noise records match the current filters.</p>`
+      }
+    </div>
+  `;
+  els.details.querySelector("[data-resample-noise]")?.addEventListener("click", () => {
+    runtime.state = selectNoise(runtime.state, runtime.visibleRecords);
+    render({ selectionOnly: true });
+    fitSelectedTopic();
+  });
+  els.details.querySelectorAll("[data-record-id]").forEach((button) => {
+    button.addEventListener("click", () => selectRecordAndRender(button.dataset.recordId));
+  });
+}
+
+function renderRecordCard(record) {
+  const recordUrl = safeRecordUrl(record.recordUrl);
+  return `
+    <article>
+      <strong>${escapeHtml(record.title || record.recordId)}</strong>
+      <p>${escapeHtml(record.customerText || "")}</p>
+      <button type="button" data-record-id="${escapeAttr(record.id)}">Inspect record</button>
+      ${recordUrl ? `<a href="${escapeAttr(recordUrl)}" rel="noreferrer" target="_blank">Open source</a>` : ""}
+    </article>
+  `;
+}
+
 function renderRecordInspector(state) {
   const artifactRecord = state.recordById.get(state.selectedRecordId);
   if (!artifactRecord) {
@@ -474,6 +539,7 @@ function renderRecordInspector(state) {
   const detailState = runtime.recordDetails.get(artifactRecord.id);
   const fullRecord = detailState?.record || artifactRecord;
   const topic = state.topicById.get(artifactRecord.clusterId);
+  const topicName = artifactRecord.isNoise ? "Noise" : topicLabel(topic);
   const loading = !detailState || detailState.status === "loading";
   const failed = detailState?.status === "error";
   const recordUrl = safeRecordUrl(fullRecord.recordUrl);
@@ -482,7 +548,7 @@ function renderRecordInspector(state) {
   els.details.innerHTML = `
     <div class="inspector-heading">
       <button type="button" data-back-to-topic>Back to topic</button>
-      <span class="topic-pill" style="--topic-color:${clusterColor(artifactRecord.clusterId)}">${escapeHtml(topicLabel(topic))}</span>
+      <span class="topic-pill" style="--topic-color:${clusterColor(artifactRecord.clusterId)}">${escapeHtml(topicName)}</span>
     </div>
     <h2>${escapeHtml(fullRecord.title || fullRecord.recordId || fullRecord.id)}</h2>
     ${loading ? `<p class="muted">Loading full record. Showing artifact preview for now.</p>` : ""}
@@ -550,7 +616,7 @@ function renderList(state, records) {
               record.clusterId === state.selectedTopicId;
             return `
               <tr class="${record.id === state.selectedRecordId ? "selected" : ""} ${topicSelected ? "topic-selected" : ""}" data-record-id="${escapeAttr(record.id)}" tabindex="0">
-                <td>${escapeHtml(topicLabel(topic))}</td>
+                <td>${escapeHtml(record.isNoise ? "Noise" : topicLabel(topic))}</td>
                 <td>${escapeHtml(record.title || record.recordId)}</td>
                 <td>${escapeHtml(record.sourceType || "")}</td>
                 <td>${escapeHtml(record.sentiment || "")}</td>
@@ -1035,6 +1101,9 @@ function updateTopicSelectionClasses(state) {
       Number(button.dataset.topicId) === state.selectedTopicId,
     );
   });
+  els.topicPanel
+    .querySelector("[data-noise-topic]")
+    ?.classList.toggle("selected", state.selectedTopicId === NOISE_TOPIC_ID);
 }
 
 function scrollSelectedTopicIntoView() {
@@ -1043,9 +1112,12 @@ function scrollSelectedTopicIntoView() {
     return;
   }
   requestAnimationFrame(() => {
-    const selected = els.topicList.querySelector(
-      `[data-topic-id="${escapeCssIdentifier(String(topicId))}"]`,
-    );
+    const selected =
+      topicId === NOISE_TOPIC_ID
+        ? els.topicList.querySelector("[data-noise-topic]")
+        : els.topicList.querySelector(
+            `[data-topic-id="${escapeCssIdentifier(String(topicId))}"]`,
+          );
     selected?.scrollIntoView({ block: "nearest" });
   });
 }

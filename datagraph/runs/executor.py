@@ -12,7 +12,12 @@ from typing import Any, Literal
 
 from datagraph.core.ids import new_id, now_iso
 from datagraph.core.labeling import LabelProvider
-from datagraph.core.openai_client import ClockFunc, EmbeddingProvider, SleepFunc
+from datagraph.core.openai_client import (
+    ClockFunc,
+    EmbeddingProvider,
+    SleepFunc,
+    make_embedding_provider,
+)
 from datagraph.core.summarization import SummaryProvider
 from datagraph.db import connect, fetch_all, fetch_one
 from datagraph.runs.cluster import execute_cluster_job
@@ -152,6 +157,11 @@ class RunExecutor:
             conn.commit()
         self._wake_event.set()
         return run_id
+
+    def embedding_provider(self, embedding_config: dict[str, Any]) -> EmbeddingProvider:
+        if self._embedding_provider_factory is not None:
+            return self._embedding_provider_factory(embedding_config)
+        return make_embedding_provider(embedding_config, api_key=self._openai_api_key)
 
     def list_runs(
         self,

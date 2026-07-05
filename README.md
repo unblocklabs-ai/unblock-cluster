@@ -135,6 +135,23 @@ empty. Prefer 6-12 months when the source system can provide it.
 | Many near-duplicate labels | Over-split clustering | Raise `minClusterSize` and trial with `setDefault:false` |
 | Higher noise after enriching text | Expected and honest separation, not a defect; pilot noise rose 0.6% to 6.4% | Inspect outliers, but do not tune away truthful no-fit records |
 
+#### Reading Your Noise
+
+Before declaring a high-noise graph to be "domain long-tail", read a random
+sample of noise records. Classify each sampled record as junk that should have
+been filtered, a missed theme that should probably be clustered, or a
+genuinely individual one-off. Then run one smaller-`minClusterSize` cluster
+tuning pass with `setDefault:false` and compare whether coherent small topics
+appear without damaging the rest of the graph.
+
+Perelel's second-brand portability run measured 25.8% noise at 10k records.
+The 25-record noise read found 0 junk, 17 missed operational long-tail themes,
+and 7 individual health questions; lowering `minClusterSize` recaptured only
+117 records while doubling topic count, so it was correctly not promoted. At
+10k+ records, long-tail noise can be normal. The drill is to read the noise,
+use focus reclustering for local drilldowns, and avoid global tuning unless
+the sample shows real junk or broad missed themes.
+
 Use representation A/B tests when quality is uncertain: create two graphs from
 the same conversations and compare outputs. Embeddings are the only meaningful
 cost. Keep a per-brand list of canonical questions and rerun it after
@@ -226,7 +243,7 @@ labeled-line summary representation for optional embedding.
 SUMMARY_RUN_ID=$(
   curl -sS -X POST "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/summarize" \
     -H 'Content-Type: application/json' \
-    -d '{"summarization":{"context":"Acme sells supplements and meal delivery. Real support traffic is about orders, spoiled deliveries, subscriptions, refunds, product guidance, and shipping."}}' \
+    -d '{"summarization":{"context":"Acme sells supplements and meal delivery. Real support traffic is about orders, spoiled deliveries, subscriptions, refunds, product guidance, and shipping. Choose product from exactly: [Metabolism Super Powder, Detox Water Drops, Daily Fiber, Prenatal Complete, Unknown]."}}' \
     | jq -r .id
 )
 
@@ -248,6 +265,9 @@ invalidates cached summaries. Use it to teach the semantic junk gate what
 counts as real support traffic for this business. Also enumerate the brand's
 canonical product families here, so `summary.product` maps extracted mentions
 to a closed set instead of creating high-cardinality one-off product strings.
+Prefer directive wording such as `Choose product from exactly: [A, B, C,
+Unknown]`; prose enumeration still produced variants such as combined
+`"Product A / Product B"` values in the Perelel run.
 
 The A/B workflow is one graph, two embedding runs, and two cluster runs: keep a
 raw embedding run as the control, create a summary embedding run, cluster each
@@ -284,7 +304,12 @@ For cost planning, the Sakara pilot summarized 2,446 records in about 14
 minutes with about 2,500 provider requests. Run stats include
 `tokenUsage: {promptTokens, completionTokens, totalTokens}` for summarize and
 label runs, and prompt tokens for embedding runs, so actual spend is auditable
-after the run completes.
+after the run completes. Dollar cost is:
+`sum(promptTokens / 1_000_000 * input_rate + completionTokens / 1_000_000 *
+output_rate)` per run, using the provider's current rate card for that model,
+then summed across the runs in your workflow. This repo intentionally does not
+maintain a rate card; use `tokenUsage` in run stats and the summarize-run
+report, then apply the current provider prices outside the repo.
 
 Receipts stay raw. Topic representatives, topic-record reads, evidence
 payloads, and the frontend artifact continue to show raw `customerText`, never
@@ -384,8 +409,11 @@ Run types:
 - `label`: async per-topic LLM labeling, with scripted providers in tests/demo.
 - `trend`: synchronous temporal aggregation over persisted cluster membership.
 
-The artifact and evidence endpoints are synchronous reads. They create no runs
-and make no provider calls.
+The artifact endpoint and most evidence recipes are synchronous reads. They
+create no runs. The one documented evidence exception is `topic_search` /
+`question_evidence`, which makes exactly one question-embedding provider call
+using the same embedding provider/model as the resolved embedding run, then
+ranks topics in memory without persisting the question vector.
 
 Summarize-run reports are synchronous reads:
 `GET /api/graphs/:gid/summarize-runs/:runId/report`.
@@ -495,6 +523,15 @@ they are empty when the window starts at the beginning of the data's time
 span — narrow the window to enable them.
 - `topic_evidence`: one topic with label object, source mix, representatives,
   and persisted trend series when present.
+- `topic_search`: embed a natural-language `question` once and rank topics by
+  cosine similarity to topic centroids in the resolved embedding space. Default
+  `topK` is 5, max is 20. If the embedding run used
+  `representation: "summary"`, the question is still embedded as-is with the
+  same model; it is matched against whatever representation built that space.
+- `question_evidence`: run `topic_search`, take the top match above the
+  exposed similarity floor, and return full `topic_evidence` plus runner-up
+  topics. If nothing clears the floor, the endpoint returns 422 with the
+  closest candidates so the agent can decide how to rephrase.
 - `compare_periods`: topics ranked by absolute share delta between two windows.
 
 Every successful evidence response includes `runRefs`, `freshness`, and
@@ -529,8 +566,27 @@ raw text to `gpt-5.4-nano`, and label runs (optional — but whenever one is
 triggered) send each topic's representative record text to `gpt-5.4-mini`.
 Skipping summarization or labeling skips those optional flows; nothing else
 transmits customer text. Redact or drop sensitive values before upload. The
-demo, default tests, mock embeddings, scripted summarization, evidence reads,
-artifact reads, and frontend build make no network calls.
+demo, default tests, mock embeddings, scripted summarization, artifact reads,
+and frontend build make no network calls. Evidence reads make no network calls
+except `topic_search` / `question_evidence`, which embed the supplied question
+once with the resolved embedding provider.
+
+Support-system PII often hides in structured fields and quoted text, not just
+the main message body. Check for requester names in ticket titles, signature
+and greeting names, quoted email display names such as `"Jane Doe" <jane@...>`,
+phone and address blocks, order/contact forms pasted into replies, and
+platform usernames or handles. Redact those patterns in the extraction layer
+before upload, especially for health, fertility, finance, or other sensitive
+domains.
+
+## Local Automation Notes
+
+When driving the API from local scripts, write multiprocessing workflows to
+real `.py` files instead of piping them through stdin or heredocs. On macOS,
+process-pool workers cannot re-import the `__main__` module from `<stdin>`,
+which breaks cluster/layout runs. Tests that intentionally need in-process CPU
+execution can use the `inline_cpu_runs=True` settings seam; agents and the
+reviewer have both hit this stdin/process-pool footgun.
 
 ## Checks
 

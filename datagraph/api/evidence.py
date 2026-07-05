@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, Request, status
 
 from datagraph.api.facets import (
@@ -11,9 +12,11 @@ from datagraph.api.facets import (
     validate_facet_by,
 )
 from datagraph.core.ids import new_id, now_iso
+from datagraph.core.openai_client import EmbeddingBatchResult
 from datagraph.core.scope import ScopeValidationError, compile_scope
 from datagraph.core.time import TimestampValidationError, parse_timestamp
 from datagraph.core.trend_math import bucket_start, compute_trends
+from datagraph.core.vectors import load_vectors_for_records, normalize_l2
 from datagraph.db import connect, fetch_all, fetch_one
 
 router = APIRouter(prefix="/api/graphs/{graph_id}/evidence", tags=["evidence"])
@@ -24,6 +27,8 @@ VALID_RECIPES = {
     "vanishing_topics",
     "rising_topics",
     "topic_evidence",
+    "topic_search",
+    "question_evidence",
     "compare_periods",
 }
 TEMPORAL_RECIPES = {
@@ -33,6 +38,8 @@ TEMPORAL_RECIPES = {
     "rising_topics",
     "compare_periods",
 }
+QUESTION_RECIPES = {"topic_search", "question_evidence"}
+QUESTION_EVIDENCE_SIMILARITY_FLOOR = 0.2
 SUMMARY_SECTION_BY_RECIPE = {
     "surprising_topics": "surprisingTopics",
     "new_topics": "newTopics",
@@ -45,7 +52,7 @@ SUMMARY_SECTION_BY_RECIPE = {
 async def create_evidence(request: Request, graph_id: str, body: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown_body(
         body,
-        {"viewId", "recipe", "timeRange", "periods", "topicId", "topK", "facetBy"},
+        {"viewId", "recipe", "timeRange", "periods", "topicId", "topK", "facetBy", "question"},
     )
     view_id = _required_string(body.get("viewId"), "viewId")
     recipe = _required_string(body.get("recipe"), "recipe")
@@ -61,10 +68,17 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
         )
     if recipe == "topic_evidence":
         _validate_topic_id_shape(body.get("topicId"))
+    if recipe in QUESTION_RECIPES:
+        question = _required_string(body.get("question"), "question")
+    else:
+        question = None
     if recipe == "compare_periods":
         _validate_periods_shape(body.get("periods"))
     facet_by = validate_facet_by(body.get("facetBy"))
-    top_k = _validate_top_k(body.get("topK", 10))
+    top_k = _validate_top_k(
+        body.get("topK", 5 if recipe in QUESTION_RECIPES else 10),
+        maximum=20 if recipe in QUESTION_RECIPES else 50,
+    )
     db_path = request.app.state.settings.db_path
     cluster_run = _resolve_cluster_run(db_path, graph_id, view_id)
     cluster_run_id = cluster_run["id"]
@@ -115,6 +129,85 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
             evidence["trend"] = topic_trend
             if topic_trend is not None:
                 run_refs["trendRunId"] = topic_trend["trendRunId"]
+        elif recipe == "topic_search":
+            evidence = await _topic_search(
+                request,
+                conn,
+                graph_id,
+                input_refs.get("embeddingRunId"),
+                cluster_run_id,
+                question,
+                top_k,
+                summaries,
+                labels,
+            )
+        elif recipe == "question_evidence":
+            ranked_topics = await _topic_search(
+                request,
+                conn,
+                graph_id,
+                input_refs.get("embeddingRunId"),
+                cluster_run_id,
+                question,
+                top_k,
+                summaries,
+                labels,
+            )
+            top_match = ranked_topics[0] if ranked_topics else None
+            if top_match is None or top_match["similarity"] < QUESTION_EVIDENCE_SIMILARITY_FLOOR:
+                evidence = {
+                    "question": question,
+                    "similarityFloor": QUESTION_EVIDENCE_SIMILARITY_FLOOR,
+                    "candidates": ranked_topics,
+                }
+                freshness = _freshness(conn, graph_id, view_id, cluster_run)
+                _persist_analysis_event(
+                    db_path,
+                    graph_id,
+                    view_id,
+                    recipe,
+                    body,
+                    run_refs,
+                    evidence,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "message": "no topic matches; closest were returned as candidates",
+                        "similarityFloor": QUESTION_EVIDENCE_SIMILARITY_FLOOR,
+                        "candidates": ranked_topics,
+                        "freshness": freshness,
+                        "runRefs": run_refs,
+                    },
+                )
+            topic_evidence = _topic_evidence(
+                conn,
+                graph_id,
+                view_id,
+                cluster_run_id,
+                top_match["clusterId"],
+                top_k,
+                summaries,
+                labels,
+                facets,
+            )
+            topic_trend = _topic_persisted_trend(
+                conn,
+                graph_id,
+                view_id,
+                cluster_run_id,
+                topic_evidence["clusterId"],
+            )
+            topic_evidence["trend"] = topic_trend
+            if topic_trend is not None:
+                run_refs["trendRunId"] = topic_trend["trendRunId"]
+            evidence = {
+                "question": question,
+                "similarityFloor": QUESTION_EVIDENCE_SIMILARITY_FLOOR,
+                "match": top_match,
+                "topicEvidence": topic_evidence,
+                "runnerUpTopics": ranked_topics[1:],
+            }
         elif recipe == "compare_periods":
             evidence = _compare_periods(
                 conn,
@@ -151,6 +244,122 @@ async def create_evidence(request: Request, graph_id: str, body: dict[str, Any])
     }
     _persist_analysis_event(db_path, graph_id, view_id, recipe, body, run_refs, evidence)
     return response
+
+
+async def _topic_search(
+    request: Request,
+    conn: Any,
+    graph_id: str,
+    embedding_run_id: str | None,
+    cluster_run_id: str,
+    question: str,
+    top_k: int,
+    summaries: dict[int, dict[str, Any]],
+    labels: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if embedding_run_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="cluster run has no embedding run reference",
+        )
+    embedding_run = _resolve_embedding_run(conn, graph_id, embedding_run_id)
+    embedding_params = json.loads(embedding_run["params_json"])
+    embedding_config = embedding_params["embedding"]
+    dimensions = int(embedding_config.get("dimensions") or 1536)
+    provider = request.app.state.run_executor.embedding_provider(embedding_config)
+    result = await provider.embed_batch([question])
+    vectors = result.vectors if isinstance(result, EmbeddingBatchResult) else result
+    if len(vectors) != 1:
+        raise RuntimeError("embedding provider returned an unexpected question vector count")
+    question_vector = normalize_l2(vectors[0])
+    centroids = _topic_centroids(
+        request.app.state.settings.db_path,
+        conn,
+        cluster_run_id,
+        embedding_run_id,
+        embedding_config["model"],
+        dimensions,
+        summaries,
+    )
+    rows = []
+    for cluster_id, centroid in centroids.items():
+        summary = summaries[cluster_id]
+        rows.append(
+            {
+                "clusterId": cluster_id,
+                "label": labels.get(cluster_id),
+                "similarity": round(float(np.dot(question_vector, centroid)), 6),
+                "size": summary["size"],
+                "sourceMix": summary["sourceMix"],
+                "representativeRecordIds": summary["representativeRecordIds"],
+            }
+        )
+    return sorted(rows, key=lambda row: (-row["similarity"], row["clusterId"]))[:top_k]
+
+
+def _resolve_embedding_run(conn: Any, graph_id: str, embedding_run_id: str) -> dict[str, Any]:
+    row = fetch_one(
+        conn,
+        """
+        SELECT *
+          FROM runs
+         WHERE id = ? AND graph_id = ? AND type = 'embed' AND status = 'succeeded'
+        """,
+        (embedding_run_id, graph_id),
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="cluster run embedding reference is unavailable",
+        )
+    return row
+
+
+def _topic_centroids(
+    db_path: str,
+    conn: Any,
+    cluster_run_id: str,
+    embedding_run_id: str,
+    model: str,
+    dimensions: int,
+    summaries: dict[int, dict[str, Any]],
+) -> dict[int, np.ndarray]:
+    centroids = {}
+    for cluster_id, summary in summaries.items():
+        record_ids = summary["representativeRecordIds"]
+        _, matrix = load_vectors_for_records(
+            db_path,
+            embedding_run_id=embedding_run_id,
+            model=model,
+            dimensions=dimensions,
+            record_ids=record_ids,
+        )
+        if not len(matrix):
+            fallback_ids = _member_record_ids(conn, cluster_run_id, cluster_id)
+            _, matrix = load_vectors_for_records(
+                db_path,
+                embedding_run_id=embedding_run_id,
+                model=model,
+                dimensions=dimensions,
+                record_ids=fallback_ids,
+            )
+        if len(matrix):
+            centroids[cluster_id] = normalize_l2(matrix.mean(axis=0))
+    return centroids
+
+
+def _member_record_ids(conn: Any, cluster_run_id: str, cluster_id: int) -> list[str]:
+    rows = fetch_all(
+        conn,
+        """
+        SELECT record_id
+          FROM cluster_memberships
+         WHERE run_id = ? AND cluster_id = ?
+         ORDER BY record_id ASC
+        """,
+        (cluster_run_id, cluster_id),
+    )
+    return [row["record_id"] for row in rows]
 
 
 def _summary_recipe(
@@ -726,10 +935,12 @@ def _validate_periods_shape(value: Any) -> None:
         )
 
 
-def _validate_top_k(value: Any) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 50:
+def _validate_top_k(value: Any, *, maximum: int = 50) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=[{"field": "topK", "message": "must be an integer from 1 to 50"}],
+            detail=[
+                {"field": "topK", "message": f"must be an integer from 1 to {maximum}"}
+            ],
         )
     return value
