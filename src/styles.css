@@ -363,6 +363,24 @@ mark {
   vector-effect: non-scaling-stroke;
 }
 
+.sparkline-partial {
+  fill: none;
+  stroke: #2563eb;
+  stroke-dasharray: 3 3;
+  stroke-linecap: round;
+  stroke-opacity: 0.45;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.sparkline-partial-point {
+  fill: #fff;
+  stroke: #2563eb;
+  stroke-opacity: 0.65;
+  stroke-width: 1.75;
+  vector-effect: non-scaling-stroke;
+}
+
 .topic-main em {
   color: #b42318;
   font-style: normal;
@@ -633,6 +651,45 @@ tbody tr.topic-selected {
   color: #334155;
   padding: 2px 6px;
   font-size: var(--text-xs);
+}
+
+.run-chip {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: copy;
+  padding: 0;
+}
+
+.run-chip code {
+  display: inline-block;
+}
+
+.run-chip:focus-visible code,
+.run-chip:hover code {
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+
+.copy-status {
+  position: absolute;
+  left: 50%;
+  top: -22px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: #0f172a;
+  color: #fff;
+  font-size: 10px;
+  opacity: 0;
+  padding: 2px 6px;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+  white-space: nowrap;
+}
+
+.run-chip.copied .copy-status {
+  opacity: 1;
 }
 
 .representation-pill {
