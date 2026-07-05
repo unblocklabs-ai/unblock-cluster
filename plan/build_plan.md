@@ -693,7 +693,11 @@ in a usable state.
 
 Ordered; top item is the next phase candidate.
 
-1. **Summarization runs (Phase 14 — decided 2026-07-04).** Optional
+1. **Topic search / question evidence (Phase 19 — third-time-confirmed ask).**
+   Embed a natural-language question, rank topics by centroid similarity,
+   return candidates with evidence — makes canonical questions first-class
+   (agents currently map questions to topic ids by hand). See amendment (h).
+2. **[SHIPPED Phase 14] Summarization runs (decided 2026-07-04).** Optional
    service-side summarize-then-embed: per-record `gpt-5.4-nano` structured
    extraction with a service-owned strict schema (issue, product,
    desiredResolution, sentiment, verbatim keyCustomerPhrases, junkType
@@ -712,6 +716,31 @@ Ordered; top item is the next phase candidate.
    portability test of the playbook/recipe split.
 
 ## Amendments
+
+**2026-07-05 (h)** (Perelel round 1 — second-brand portability: PASSED).
+Fresh brand (women's health), fresh helpdesk (Gorgias, not Kustomer), fresh
+agent (Veras): 24 minutes export → first labeled graph, 0 upload rejects,
+0 artifact warnings, 1 human intervention (API-key location; ops not
+product). Most onboarding decisions answered by the README alone; the
+Sakara recipe transferred structurally; invented-fresh items were largely
+inherently brand-specific. PII gap caught in review (customer names in
+titles on health data) was remediated extraction-side with scan
+verification. Noise finding: 25.8% at 10k records (effectiveHdbscan
+minClusterSize hit 51 via the 0.5% scaling) — the 25-sample read was 0
+junk, 17 missed operational long-tail themes, 7 individual health
+questions; lowering minClusterSize recaptured only 117 records while
+doubling topic count (correctly not promoted). Lesson: at 10k+ the noise
+pool is long-tail themes, and representation/canonicalization beats global
+tuning; focus reclustering is the drill. Cost now auditable via tokenUsage
+(11,198 summaries: 27 failures/70 retries = 0.24%, self-heal available).
+Doc gaps to fix (quoted in the report): concrete PII pattern examples,
+closed product enum (prose context still yields facet variants like
+"Conception Support Pack / 1st Trimester..."), a noise-read protocol
+before declaring domain long-tail, the stdin/multiprocessing local-script
+footgun, and a cost formula using tokenUsage. Feature signal (third
+confirmation across brands): canonical questions are not first-class —
+agents manually map question text to topic ids. Phase 19: topic-search /
+question-evidence + the doc fixes.
 
 **2026-07-04 (g)** (pilot round 4 — raw vs summary A/B verdict: SUMMARY WINS
 for Sakara). The semantic junk gate removed 437 records with zero new regex
