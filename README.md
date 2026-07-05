@@ -85,7 +85,9 @@ autoresponders. Exclude transactional sends and automated campaign records such
 as newsletters, tracking-pixel bodies, and URL-dominant bodies. Exclude
 vendor/PR outreach, records with zero customer-authored messages (use inbound
 message counts when the source provides them), and records with no meaningful
-free text such as score-only NPS rows. Exclude device/platform relay
+free text such as score-only NPS rows. Zero-agent-reply threads are often junk
+but can include unanswered complaints; never drop on that signal alone. Combine
+it with inbound count and the semantic junk gate. Exclude device/platform relay
 notifications such as printer confirmations, marketplace payout notices, and
 chargeback status messages unless they include customer-authored substance.
 
@@ -314,7 +316,50 @@ report, then apply the current provider prices outside the repo.
 Receipts stay raw. Topic representatives, topic-record reads, evidence
 payloads, and the frontend artifact continue to show raw `customerText`, never
 the summary representation. Summaries are derived artifacts for embedding,
-faceting, and the summarize-run report.
+faceting, labeling when selected, and the summarize-run report.
+
+### Labeling Configuration And Reports
+
+Label runs default to `labeling.topK: 12` stored representatives per topic.
+`labeling.exampleTextLimit` defaults to `700` characters per representative
+block and controls the text the label provider sees; stored records are not
+truncated. `labeling.promptAppend` accepts up to 2,000 characters and is
+appended after either the built-in prompt or a full `labeling.prompt` override.
+Both the append text and the example limit are echoed in run params/stats, and
+the effective prompt hash changes when the append text changes.
+
+Terse-ticket brands often do better with fewer and shorter examples because
+each representative already carries a complete support ask. Heterogeneous
+clusters usually need more examples, not longer ones: raise `labeling.topK`
+first so the model sees breadth, then adjust `exampleTextLimit` only when
+important context is being truncated.
+
+`labeling.textSource` controls which representative text is sent to the label
+provider:
+
+- `"auto"` (default): use summary `rendered_text` when the cluster run came
+  from a summary-backed embedding run; otherwise use raw `customerText`.
+- `"raw"`: always use raw `customerText`; this preserves pre-summary behavior.
+- `"summary"`: require summary-backed cluster lineage. Without it, the label
+  POST returns 422 naming the summarize endpoint to run first.
+
+When summary text is selected, any representative missing a summary falls back
+to raw `customerText`; run stats report `textSource: "summary_rendered_text"`
+and `fallbackRawCount`. Raw runs report `textSource: "raw_customer_text"`.
+
+Inspect exactly what a label run would send with:
+
+```sh
+curl -sS "http://127.0.0.1:8080/api/graphs/$GRAPH_ID/label-runs/$LABEL_RUN_ID/report"
+```
+
+The report recomputes representative blocks from the run's recorded params and
+stored representatives. It includes record ids, title presence, per-block text
+source, truncation flags, prompt hash, model, duplicate-label groups, near
+duplicates, and very-short/generic label flags. Near duplicates are detected
+deterministically by lowercasing labels, tokenizing on alphanumerics, and
+flagging non-identical label pairs whose shared-token count covers at least
+80% of the smaller token set. Prompt inputs are intentionally not persisted.
 
 Minimum pipeline:
 
@@ -355,6 +400,23 @@ CPU job (cluster/layout) is not interruptible.
 
 Missing prerequisite runs return actionable 409 messages naming the endpoint to
 trigger.
+
+To rerun the full API pipeline for an existing graph/view:
+
+```sh
+.venv/bin/python scripts/rerun_pipeline.py \
+  --graph "$GRAPH_ID" \
+  --view "$VIEW_ID" \
+  --representation raw \
+  --config-json '{"cluster":{"hdbscan":{"minClusterSize":20}}}'
+```
+
+Add `--summarize --representation summary` to refresh summaries and build a
+summary-backed embedding run. Add `--base-url http://127.0.0.1:8080` to drive
+an already-running server; without `--base-url`, the script opens an
+in-process app against `--data-dir` and still uses only API endpoints. The
+script promotes each successful cluster/layout/label/trend run with
+`setDefault:true`, prints run ids, stats, token usage, and the final `vizUrl`.
 
 ## Views And Scopes
 
@@ -560,10 +622,13 @@ last-write-wins. Unchanged text is never re-embedded.
 
 Extraction, pre-filtering, aggregation, and redaction belong to agents before
 upload — this service has no redaction pipeline. With `provider: "openai"`,
-customer text leaves the machine at two points: embedding runs send every
-record's rendered text, summarize runs (optional) send every record's rendered
-raw text to `gpt-5.4-nano`, and label runs (optional — but whenever one is
-triggered) send each topic's representative record text to `gpt-5.4-mini`.
+customer text can leave the machine through three provider flows: embedding
+runs send every record's rendered text, summarize runs (optional) send every
+record's rendered raw text to `gpt-5.4-nano`, and label runs (optional — but
+whenever one is triggered) send each topic's representative text to
+`gpt-5.4-mini`. Label representatives are raw `customerText` by default for
+raw clusters, and summary `rendered_text` by default for summary-backed
+clusters unless `labeling.textSource` is set explicitly.
 Skipping summarization or labeling skips those optional flows; nothing else
 transmits customer text. Redact or drop sensitive values before upload. The
 demo, default tests, mock embeddings, scripted summarization, artifact reads,

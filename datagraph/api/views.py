@@ -27,6 +27,7 @@ from datagraph.core.scope import ScopeValidationError, compile_scope, validate_s
 from datagraph.core.time import TimestampValidationError, parse_timestamp
 from datagraph.core.trend_math import bucket_start
 from datagraph.db import connect, fetch_all, fetch_one
+from datagraph.runs.label import LabelTextSourceError, resolve_label_text_source
 
 router = APIRouter(prefix="/api/graphs/{graph_id}/views", tags=["views"])
 
@@ -313,6 +314,18 @@ async def create_label_run(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=exc.errors,
+        ) from exc
+    try:
+        resolve_label_text_source(
+            request.app.state.settings.db_path,
+            graph_id=graph_id,
+            cluster_run=cluster_run,
+            requested=merged["labeling"].get("textSource", "auto"),
+        )
+    except LabelTextSourceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=[{"field": "labeling.textSource", "message": str(exc)}],
         ) from exc
     run_id = request.app.state.run_executor.enqueue_run(
         graph_id,

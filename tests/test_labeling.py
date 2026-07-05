@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ from datagraph.runs.label import (
 from scripts.gen_synthetic import generate_records
 from tests.helpers import test_settings
 from tests.test_clustering_layout import StructuredTopicProvider
+from tests.test_summarize import ScriptedSummaryProvider, StructuredSummaryEmbeddingProvider
 
 
 class ScriptedLabelProvider:
@@ -83,6 +85,10 @@ def test_prompt_assembly_topk_truncation_absent_title_and_stable_format() -> Non
     assert effective_label_prompt({"prompt": None}) == DEFAULT_LABEL_PROMPT
     assert effective_label_prompt({"prompt": "   "}) == DEFAULT_LABEL_PROMPT
     assert effective_label_prompt({"prompt": "Custom prompt"}) == "Custom prompt"
+    assert effective_label_prompt({"prompt": "  Custom prompt  "}) == "  Custom prompt  "
+    assert effective_label_prompt(
+        {"prompt": "Custom prompt", "promptAppend": "Use brand taxonomy."}
+    ) == "Custom prompt\n\nAdditional brand instructions:\nUse brand taxonomy."
 
 
 @pytest.mark.slow
@@ -107,6 +113,14 @@ def test_label_run_persists_merges_and_relabels_subset(tmp_path: Path) -> None:
         assert label_run["stats"]["failed"] == 0
         assert label_run["stats"]["providerRequests"] == len(cluster_ids)
         assert label_run["stats"]["promptHash"] == prompt_sha256(DEFAULT_LABEL_PROMPT)
+        assert label_run["stats"]["textSource"] == "raw_customer_text"
+        assert label_run["stats"]["fallbackRawCount"] == 0
+        assert label_run["stats"]["exampleTextLimit"] == 700
+        assert all(
+            "junkType:" not in block
+            for _, blocks in label_provider.calls
+            for block in blocks
+        )
         refreshed_view = client.get(f"/api/graphs/{graph_id}/views/{view_id}").json()
         assert refreshed_view["defaultLabelRunId"] == label_run_id
 
@@ -175,6 +189,120 @@ def test_label_run_persists_merges_and_relabels_subset(tmp_path: Path) -> None:
         assert history_count == 2
         assert newest["top_k"] == 3
         assert newest["prompt_hash"] == prompt_sha256(override_prompt)
+
+
+@pytest.mark.slow
+def test_label_text_source_lineage_fallback_report_and_quality(tmp_path: Path) -> None:
+    records = generate_records(5000, 42)[:260]
+    summary_provider = ScriptedSummaryProvider()
+    embedding_provider = StructuredSummaryEmbeddingProvider()
+    label_provider = ScriptedLabelProvider()
+    with _phase20_client(
+        tmp_path,
+        summary_provider,
+        embedding_provider,
+        label_provider,
+    ) as client:
+        graph = _create_summary_graph(client)
+        graph_id = graph["id"]
+        view_id = _all_records_view_id(graph)
+        _post_records(client, graph_id, records)
+        summarize_run_id = client.post(f"/api/graphs/{graph_id}/summarize", json={}).json()["id"]
+        assert _poll_run(client, graph_id, summarize_run_id, timeout=120)["status"] == "succeeded"
+        embed_run_id = client.post(
+            f"/api/graphs/{graph_id}/embeddings",
+            json={"representation": "summary"},
+        ).json()["id"]
+        assert _poll_run(client, graph_id, embed_run_id, timeout=60)["status"] == "succeeded"
+        cluster_run_id = client.post(
+            f"/api/graphs/{graph_id}/views/{view_id}/cluster",
+            json={
+                "embeddingRunId": embed_run_id,
+                "cluster": {"space": {"method": "none"}, "hdbscan": {"minClusterSize": 8}},
+            },
+        ).json()["id"]
+        assert _poll_run(client, graph_id, cluster_run_id, timeout=120)["status"] == "succeeded"
+        cluster_ids = _cluster_ids(client, cluster_run_id)
+        representative_id = _first_representative_id(client, cluster_run_id, cluster_ids[0])
+        fallback_raw_text = "I still need help with a long raw fallback example. " * 8
+        with connect(client.app.state.settings.db_path) as conn:
+            conn.execute(
+                "DELETE FROM summary_items WHERE run_id = ? AND record_id = ?",
+                (summarize_run_id, representative_id),
+            )
+            conn.execute(
+                "UPDATE records SET customer_text = ? WHERE id = ?",
+                (fallback_raw_text, representative_id),
+            )
+            conn.commit()
+
+        label_provider.results = [
+            LabelResult(
+                label="Duplicate Label",
+                summary="Repeated label for duplicate detection.",
+                key_signals=["duplicate"],
+                tags=["duplicate"],
+                coherent=True,
+            )
+            for _ in cluster_ids
+        ]
+        prompt_append = "Use lifecycle-stage naming when it is visible."
+        run_id = _enqueue_label(
+            client,
+            graph_id,
+            view_id,
+            body={
+                "labeling": {
+                    "promptAppend": prompt_append,
+                    "exampleTextLimit": 220,
+                    "topK": 4,
+                }
+            },
+        )
+        run = _poll_run(client, graph_id, run_id, timeout=120)
+        assert run["status"] == "succeeded", run
+        assert run["stats"]["textSource"] == "summary_rendered_text"
+        assert run["stats"]["fallbackRawCount"] == 1
+        assert run["stats"]["exampleTextLimit"] == 220
+        assert run["stats"]["promptHash"] == prompt_sha256(
+            effective_label_prompt(
+                {
+                    "prompt": None,
+                    "promptAppend": prompt_append,
+                    "topK": 4,
+                    "exampleTextLimit": 220,
+                    "textSource": "auto",
+                }
+            )
+        )
+        assert prompt_append in label_provider.calls[0][0]
+        sent_blocks = [block for _, blocks in label_provider.calls for block in blocks]
+        assert any("junkType:" in block for block in sent_blocks)
+        assert any("junkType:" not in block for block in sent_blocks)
+
+        report = client.get(f"/api/graphs/{graph_id}/label-runs/{run_id}/report")
+        assert report.status_code == 200, report.text
+        body = report.json()
+        first_report_blocks = [
+            item["block"] for item in body["clusters"][0]["representatives"]
+        ]
+        assert first_report_blocks == label_provider.calls[0][1]
+        assert body["clusters"][0]["representatives"][0]["id"] == representative_id
+        assert body["clusters"][0]["representatives"][0]["recordId"]
+        assert body["clusters"][0]["representatives"][0]["textSource"] == "raw_customer_text"
+        assert body["clusters"][0]["representatives"][0]["truncationApplied"] is True
+        assert body["labelQuality"]["exactDuplicateGroups"][0]["label"] == "Duplicate Label"
+        assert sorted(body["labelQuality"]["exactDuplicateGroups"][0]["clusterIds"]) == cluster_ids
+        assert body["reportNote"].startswith("Representative blocks are recomputed")
+
+        raw_graph = _create_graph(client)
+        raw_graph_id, raw_view_id, _raw_cluster_run_id = _cluster_fixture(client, graph=raw_graph)
+        missing_lineage = client.post(
+            f"/api/graphs/{raw_graph_id}/views/{raw_view_id}/label",
+            json={"labeling": {"textSource": "summary"}},
+        )
+        assert missing_lineage.status_code == 422
+        assert "/summarize" in missing_lineage.text
 
 
 @pytest.mark.slow
@@ -295,6 +423,22 @@ def _phase4_client(
     )
 
 
+def _phase20_client(
+    tmp_path: Path,
+    summary_provider: ScriptedSummaryProvider,
+    embedding_provider: StructuredSummaryEmbeddingProvider,
+    label_provider: ScriptedLabelProvider,
+) -> TestClient:
+    return TestClient(
+        create_app(
+            test_settings(tmp_path / "data"),
+            embedding_provider_factory=lambda _config: embedding_provider,
+            summary_provider_factory=lambda _config: summary_provider,
+            label_provider_factory=lambda _config: label_provider,
+        )
+    )
+
+
 def _structured_provider(record_count: int = 300) -> StructuredTopicProvider:
     records = generate_records(5000, 42)[:record_count]
     text_config = {
@@ -350,6 +494,39 @@ def _create_graph(client: TestClient) -> dict[str, Any]:
     return response.json()
 
 
+def _create_summary_graph(client: TestClient) -> dict[str, Any]:
+    response = client.post(
+        "/api/graphs",
+        json={
+            "name": f"Phase 20 {time.monotonic_ns()}",
+            "config": {
+                "embedding": {
+                    "provider": "mock",
+                    "model": "structured-summary-mock",
+                    "dimensions": 32,
+                    "textFields": [
+                        "sourceRecordId",
+                        "title",
+                        "customerText",
+                        "product",
+                        "tags",
+                    ],
+                    "requestsPerMinute": 1000,
+                    "maxConcurrency": 8,
+                },
+                "cluster": {
+                    "space": {"method": "none"},
+                    "hdbscan": {"minClusterSize": 8, "minSamples": 3},
+                    "seed": 42,
+                },
+                "summarization": {"requestsPerMinute": 100000, "maxConcurrency": 8},
+            },
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def _post_records(client: TestClient, graph_id: str, records: list[dict[str, Any]]) -> None:
     for start in range(0, len(records), 1000):
         response = client.post(
@@ -377,6 +554,24 @@ def _cluster_ids(client: TestClient, cluster_run_id: str) -> list[int]:
     cluster_ids = [row["cluster_id"] for row in rows]
     assert cluster_ids
     return cluster_ids
+
+
+def _first_representative_id(
+    client: TestClient,
+    cluster_run_id: str,
+    cluster_id: int,
+) -> str:
+    with connect(client.app.state.settings.db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT representative_record_ids_json
+              FROM cluster_summaries
+             WHERE run_id = ? AND cluster_id = ?
+            """,
+            (cluster_run_id, cluster_id),
+        ).fetchone()
+    assert row is not None
+    return json.loads(row["representative_record_ids_json"])[0]
 
 
 def _enqueue_label(

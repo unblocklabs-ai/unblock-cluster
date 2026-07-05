@@ -33,7 +33,15 @@ DEFAULT_GRAPH_CONFIG: dict[str, Any] = {
         "seed": 42,
     },
     "layout": {"method": "umap", "nNeighbors": 30, "minDist": 0.1},
-    "labeling": {"provider": "openai", "model": "gpt-5.4-mini", "topK": 12, "prompt": None},
+    "labeling": {
+        "provider": "openai",
+        "model": "gpt-5.4-mini",
+        "topK": 12,
+        "prompt": None,
+        "promptAppend": None,
+        "exampleTextLimit": 700,
+        "textSource": "auto",
+    },
     "summarization": {
         "provider": "openai",
         "model": "gpt-5.4-nano",
@@ -139,6 +147,41 @@ def validate_graph_config(config: Any, *, require_text_fields: bool = True) -> d
     if prompt is not None and not isinstance(prompt, str):
         errors.append(
             {"field": "config.labeling.prompt", "message": "must be a string or null"}
+        )
+    prompt_append = labeling.get("promptAppend")
+    if prompt_append is not None:
+        if not isinstance(prompt_append, str):
+            errors.append(
+                {
+                    "field": "config.labeling.promptAppend",
+                    "message": "must be a string or null",
+                }
+            )
+        elif len(prompt_append) > 2000:
+            errors.append(
+                {
+                    "field": "config.labeling.promptAppend",
+                    "message": "must be at most 2000 characters",
+                }
+            )
+    example_text_limit = labeling.get("exampleTextLimit")
+    if (
+        not isinstance(example_text_limit, int)
+        or isinstance(example_text_limit, bool)
+        or not 100 <= example_text_limit <= 4000
+    ):
+        errors.append(
+            {
+                "field": "config.labeling.exampleTextLimit",
+                "message": "must be an integer from 100 to 4000",
+            }
+        )
+    if labeling.get("textSource") not in {"auto", "raw", "summary"}:
+        errors.append(
+            {
+                "field": "config.labeling.textSource",
+                "message": 'must be "auto", "raw", or "summary"',
+            }
         )
 
     summarization = normalized["summarization"]
