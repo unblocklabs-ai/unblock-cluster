@@ -1,0 +1,31 @@
+# Phase 20 `/goal` prompt (for gpt-5.5 / Codex)
+
+Paste everything below as the `/goal`:
+
+---
+
+/goal Complete Phase 20 ("Label representation fidelity and label observability") of `plan/build_plan.md`. The binding spec is Amendment 2026-07-05 (i) — read it; it records a CONFIRMED bug from second-brand production use plus the observability asks around it. Build on Phases 0–19. No new dependencies.
+
+The bug: summary-backed clustering embeds `record_summaries.rendered_text`, but `datagraph/runs/label.py::_load_records` selects raw `records.customer_text` unconditionally — clusters formed in one representation get labeled from another (representation drift; symptom: generic/noisy labels on long raw threads).
+
+Desired end state: label runs send the SAME representation that formed the cluster (auto-following lineage, overridable, with counted fallbacks); what the labeler saw is inspectable per cluster via a report endpoint; the hidden label-quality knobs are configurable and echoed; brands can overlay prompt rules without forking the base prompt; a duplicate/generic-label check ships in the report; and a rerun-pipeline script fixes refresh ergonomics — all verified by a green suite covering the exact test list from the field report.
+
+Deliverables:
+
+1. Representation-faithful labeling: `labeling` config gains `textSource: "auto" (default) | "raw" | "summary"`. Resolution per label run: `"auto"` follows the lineage — if the target cluster run's embedding run has `inputRefs.summarizeRunId`, representative text = the summary `rendered_text` (join summary_items/record_summaries through that summarize run); otherwise raw `customer_text`. Explicit `"summary"` without lineage → 422 at POST time naming the summarize endpoint. Representatives whose summary is missing (failed records) fall back to raw text and are COUNTED in stats (`fallbackRawCount`) — explicit, never silent. Raw-lineage runs behave exactly as today.
+2. Observability: label run stats gain `textSource` (the resolved value: `"summary_rendered_text"` | `"raw_customer_text"`) and `fallbackRawCount`. New `GET /api/graphs/:gid/label-runs/:runId/report`: per cluster — the exact representative blocks as assembled (record ids, title presence, text source per block, truncation applied), the effective prompt hash, model, and a `labelQuality` section: exact-duplicate label groups and near-duplicates (normalized token overlap — pick a simple, deterministic measure and document it), plus very-short/generic flags. Blocks are RECOMPUTED from the run's recorded params + stored representatives (do not persist prompt inputs — no duplicated customer text in storage); document in the endpoint's README section that the report reflects current assembly code applied to the run's recorded inputs.
+3. Configurable knobs: `labeling.exampleTextLimit` (default 700 — replaces the hardcoded RECORD_TEXT_LIMIT; validated int, sane bounds, echoed in stats) and `labeling.promptAppend` (optional string ≤ 2,000 chars appended to the effective base prompt AFTER any full `prompt` override — brand naming conventions compose instead of forking; included in the prompt hash so changes invalidate nothing silently). Update the README labeling docs: topK, exampleTextLimit, promptAppend, textSource, with the guidance that terse-ticket brands may want fewer/shorter examples and heterogeneous clusters more.
+4. `scripts/rerun_pipeline.py`: given `--graph`/`--view` (and optional flags: `--summarize`, `--representation raw|summary`, config override JSON), re-runs the chain in order (summarize if asked → embed → cluster → layout → label → trends) with `setDefault: true`, polls each run, and prints a final summary table (run ids, key stats, tokenUsage) ending with the vizUrl — the "rerun and promote defaults" command agents keep hand-rolling. Reuses the API only (no direct DB writes); works against a running server via `--base-url` or in-process like demo_seed.
+5. README extraction-checklist addition (boundary preserved — guidance, not code): zero-agent-reply threads (`agentMessageCount=0`-style signals) are often junk BUT include unanswered real complaints — never drop on that signal alone; combine with inbound-message count and the semantic junk gate.
+
+Verified by — run all of these; do not claim completion from belief (this list is the field report's, verbatim, plus review additions):
+
+- `.venv/bin/pytest -n auto` green including: summary-backed cluster → label representative blocks use rendered_text (assert via a capturing scripted provider that records what it was sent); raw cluster → blocks use customer_text; one representative with a missing summary → raw fallback, counted in `fallbackRawCount`; label stats record `textSource` both ways; explicit textSource "summary" without lineage → 422; `promptAppend` and `exampleTextLimit` alter the effective prompt hash and the assembled blocks respectively; the label-run report returns the recomputed blocks matching what the capturing provider saw, plus duplicate-label groups on a scripted duplicate scenario; rerun_pipeline smoke (small graph in-process, asserts final defaults point at the new runs and the printed summary contains the vizUrl).
+- `node --test` green (no UI changes expected; if any, say why).
+- `ruff check .`, `npx knip`, `npm run build`, `npm run check` green; suite budget ~40s parallel.
+
+While preserving: receipts untouched (representatives in topics/evidence/artifact/UI remain raw customer text — only the LABELER'S input follows representation); existing label runs' persisted rows unaffected; raw-lineage labeling byte-identical to today; the warnings array unchanged (label-quality flags live in the report, not warnings); `plan/` untouched; no new dependencies; read-only mode blocks the rerun script's mutations like any other.
+
+Between iterations: fast tier while iterating, full checks before completion; keep the decisions list for the final summary.
+
+If blocked — the lineage join is ambiguous for a run state this goal doesn't anticipate, or the near-duplicate measure is unstable — stop and report with specifics. Do not persist prompt inputs, leak summary text into receipts, drop the raw fallback silently, or put label-quality flags into the warnings array.

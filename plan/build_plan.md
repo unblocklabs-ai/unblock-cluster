@@ -717,6 +717,27 @@ Ordered; top item is the next phase candidate.
 
 ## Amendments
 
+**2026-07-05 (i)** (Perelel repo-level feedback — labeling representation
+drift, CONFIRMED bug). Summary-backed clustering embeds
+record_summaries.rendered_text, but label runs load raw
+records.customer_text for representatives — clusters formed in one
+representation, labeled from another (symptom: generic labels on long raw
+threads). The receipts principle is NOT implicated: it governs what humans
+see; labeler input is model-facing and should match the space that formed
+the cluster. Phase 20 decisions: label loader follows cluster → embed →
+summarize lineage (textSource auto|raw|summary config, auto default;
+missing-summary fallback counted); label stats/report expose textSource;
+new label-run report endpoint reconstructs the exact representative blocks
+sent per cluster (recomputed from run params + stored representatives, not
+persisted); labeling.exampleTextLimit config (was hardcoded 700);
+labeling.promptAppend overlay (compose brand rules without forking the
+base prompt; in the prompt hash); duplicate/generic-label detection in the
+label report (not the warnings array); scripts/rerun_pipeline.py for
+refresh ergonomics with a printed vizUrl. Boundary held on the import-hook
+ask: extraction filtering stays agent-side, documented with the
+agentMessageCount=0 caveat (zero-agent-reply threads include UNANSWERED
+REAL COMPLAINTS — never drop on that signal alone).
+
 **2026-07-05 (h)** (Perelel round 1 — second-brand portability: PASSED).
 Fresh brand (women's health), fresh helpdesk (Gorgias, not Kustomer), fresh
 agent (Veras): 24 minutes export → first labeled graph, 0 upload rejects,
