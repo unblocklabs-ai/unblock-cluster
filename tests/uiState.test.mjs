@@ -8,8 +8,11 @@ import {
   clearTopicSelection,
   datePresetFilters,
   listWindow,
+  noiseRecords,
   parseViewParams,
   representativeRecords,
+  sampleNoiseRecordIds,
+  selectNoise,
   selectRecord,
   selectTopic,
   selectedTopicExtentRecords,
@@ -80,6 +83,49 @@ const artifact = {
     },
   ],
 };
+
+const noiseArtifact = {
+  ...artifact,
+  noise: { noiseCount: 4, noiseRatio: 0.4 },
+  data: [
+    ...artifact.data,
+    {
+      id: "n1",
+      recordId: "noise-1",
+      title: "One-off note",
+      customerText: "Individual context",
+      sourceType: "support",
+      timestamp: "2025-12-21T00:00:00Z",
+      clusterId: -1,
+      isNoise: true,
+    },
+    {
+      id: "n2",
+      recordId: "noise-2",
+      title: "Another one-off",
+      customerText: "No shared theme",
+      sourceType: "review",
+      timestamp: "2025-12-22T00:00:00Z",
+      clusterId: -1,
+      isNoise: true,
+    },
+    {
+      id: "n3",
+      recordId: "noise-3",
+      title: "Edge case",
+      customerText: "Different individual issue",
+      sourceType: "support",
+      timestamp: "2025-12-23T00:00:00Z",
+      clusterId: -1,
+      isNoise: true,
+    },
+  ],
+};
+
+function sequenceRng(values) {
+  let index = 0;
+  return () => values[index++ % values.length];
+}
 
 test("parses graph and view query parameters", () => {
   assert.deepEqual(parseViewParams("?graphId=grf_1&viewId=view_1"), {
@@ -246,6 +292,51 @@ test("record selection from list, map, and representative card converges selecti
   assert.deepEqual(publicSelection(fromCard), publicSelection(fromList));
   assert.equal(fromList.filters.topicId, "");
   assert.equal(fromCard.filters.topicId, "");
+});
+
+test("selects noise with seeded sampling and noise-only spatial extent", () => {
+  const state = buildViewState(noiseArtifact);
+  const selected = selectNoise(state, visibleRecords(state), {
+    limit: 2,
+    rng: sequenceRng([0.7, 0.2, 0.5]),
+  });
+
+  assert.equal(selected.selectedTopicId, -1);
+  assert.equal(selected.selectedRecordId, null);
+  assert.deepEqual(selected.noiseSampleIds, ["n2", "n3"]);
+  assert.deepEqual(
+    noiseRecords(visibleRecords(selected)).map((record) => record.id),
+    ["n1", "n2", "n3"],
+  );
+  assert.deepEqual(
+    selectedTopicExtentRecords(selected).map((record) => record.id),
+    ["n1", "n2", "n3"],
+  );
+});
+
+test("noise selection resamples on repeated clicks", () => {
+  const state = buildViewState(noiseArtifact);
+  const first = selectNoise(state, visibleRecords(state), {
+    limit: 2,
+    rng: sequenceRng([0.1, 0.2, 0.3]),
+  });
+  const second = selectNoise(first, visibleRecords(first), {
+    limit: 2,
+    rng: sequenceRng([0.3, 0.1, 0.2]),
+  });
+
+  assert.deepEqual(first.noiseSampleIds, ["n1", "n2"]);
+  assert.deepEqual(second.noiseSampleIds, ["n2", "n3"]);
+});
+
+test("samples noise records directly with an injectable rng", () => {
+  assert.deepEqual(
+    sampleNoiseRecordIds(noiseArtifact.data, {
+      limit: 20,
+      rng: sequenceRng([0.9, 0.1, 0.3]),
+    }),
+    ["n2", "n3", "n1"],
+  );
 });
 
 test("list window caps rows and advances by page without touching filters", () => {

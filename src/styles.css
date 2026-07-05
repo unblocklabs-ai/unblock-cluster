@@ -302,6 +302,20 @@ mark {
   background: #eff6ff;
 }
 
+.topic.noise-topic {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  border-color: #d8dee8;
+  background: #fff;
+  box-shadow: 0 -8px 16px rgba(255, 255, 255, 0.88);
+}
+
+.topic.noise-topic.selected {
+  border-color: #475569;
+  background: #f8fafc;
+}
+
 #topicList {
   min-height: 0;
   overflow-y: auto;
@@ -312,6 +326,11 @@ mark {
   height: 12px;
   border-radius: 50%;
   margin-top: 3px;
+}
+
+.noise-swatch {
+  background: #6b7280;
+  border: 2px solid #e5e7eb;
 }
 
 .topic-main {
@@ -486,6 +505,10 @@ dd {
 
 .representatives article button {
   margin-right: 8px;
+}
+
+.inspector-actions {
+  margin: 8px 0 14px;
 }
 
 table {
