@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -21,16 +22,23 @@ import {
   showMoreListRecords,
   sentimentCell,
   spikeBadge,
+  formatTrendBucketReadout,
   topicPanelTopics,
+  trendSparklineBucketIndexAtX,
+  trendSparklineKeyboardIndex,
   trendSparklinePartialPath,
   trendSparklinePath,
+  trendSparklinePointAtIndex,
   trendSparklineParts,
+  trendSparklineReadout,
   trendSparklineTitle,
   updateFilters,
   updateTopicPanel,
   visibleRecords,
   viewSearchParams,
 } from "../src/uiState.js";
+
+const appSource = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
 
 const artifact = {
   graphId: "grf_1",
@@ -623,6 +631,115 @@ test("builds sparkline title from the trimmed range", () => {
     ),
     "(partial) May 11 – May 18 · peak 32 (May 11)",
   );
+});
+
+test("maps pointer x to the nearest trimmed sparkline bucket", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 2 },
+    { bucketStart: "2025-05-11", count: 10 },
+    { bucketStart: "2025-05-18", count: 4 },
+  ];
+  const options = { width: 10, height: 6, padding: 1 };
+
+  assert.equal(trendSparklineBucketIndexAtX(buckets, -20, options), 0);
+  assert.equal(trendSparklineBucketIndexAtX(buckets, 30, options), 2);
+  assert.equal(trendSparklineBucketIndexAtX(buckets, 2.9, options), 0);
+  assert.equal(trendSparklineBucketIndexAtX(buckets, 3.1, options), 1);
+  assert.equal(
+    trendSparklineBucketIndexAtX([{ bucketStart: "2025-05-04", count: 7 }], 9, options),
+    0,
+  );
+  assert.equal(trendSparklineBucketIndexAtX([], 4, options), null);
+});
+
+test("maps pointer x against trimmed buckets instead of raw leading-zero offsets", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 0 },
+    { bucketStart: "2025-05-11", count: 0 },
+    { bucketStart: "2025-05-18", count: 5 },
+    { bucketStart: "2025-05-25", count: 10 },
+    { bucketStart: "2025-06-01", count: 2 },
+  ];
+  const options = { width: 10, height: 6, padding: 1 };
+
+  assert.equal(trendSparklineBucketIndexAtX(buckets, 1, options), 0);
+  assert.equal(trendSparklinePointAtIndex(buckets, 0, options).bucket.bucketStart, "2025-05-18");
+  assert.equal(trendSparklinePointAtIndex(buckets, 2, options).bucket.bucketStart, "2025-06-01");
+});
+
+test("formats sparkline scrub readouts by bucket granularity and bucket state", () => {
+  assert.equal(
+    formatTrendBucketReadout(
+      { bucketStart: "2025-05-18", count: 1234, spikeScore: 0 },
+      { bucket: "day" },
+    ),
+    "1,234 records · May 18",
+  );
+  assert.equal(
+    formatTrendBucketReadout(
+      { bucketStart: "2025-05-18", count: 212, spikeScore: 3.24 },
+      { bucket: "week", partial: true },
+    ),
+    "212 records · week of May 18 (partial) · spike 3.2",
+  );
+  assert.equal(
+    formatTrendBucketReadout(
+      { bucketStart: "2025-05-01", count: 1, spikeScore: 0 },
+      { bucket: "month" },
+    ),
+    "1 record · May 2025",
+  );
+});
+
+test("sparkline scrub readout agrees with partial first and final buckets", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 2, spikeScore: 0 },
+    { bucketStart: "2025-05-11", count: 10, spikeScore: 2.5 },
+    { bucketStart: "2025-05-18", count: 4, spikeScore: 0 },
+  ];
+  const options = {
+    width: 10,
+    height: 6,
+    padding: 1,
+    bucket: "week",
+    minRecordTimestamp: "2025-05-06T12:00:00Z",
+    maxRecordTimestamp: "2025-05-20T12:00:00Z",
+  };
+
+  assert.equal(trendSparklineReadout(buckets, 0, options), "2 records · week of May 4 (partial)");
+  assert.equal(trendSparklineReadout(buckets, 1, options), "10 records · week of May 11 · spike 2.5");
+  assert.equal(trendSparklineReadout(buckets, 2, options), "4 records · week of May 18 (partial)");
+});
+
+test("navigates sparkline scrub buckets with clamped keyboard transitions", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 2 },
+    { bucketStart: "2025-05-11", count: 10 },
+    { bucketStart: "2025-05-18", count: 4 },
+  ];
+
+  assert.equal(trendSparklineKeyboardIndex(null, "ArrowRight", buckets), 0);
+  assert.equal(trendSparklineKeyboardIndex(null, "ArrowLeft", buckets), 2);
+  assert.equal(trendSparklineKeyboardIndex(0, "ArrowLeft", buckets), 0);
+  assert.equal(trendSparklineKeyboardIndex(1, "ArrowRight", buckets), 2);
+  assert.equal(trendSparklineKeyboardIndex(2, "ArrowRight", buckets), 2);
+  assert.equal(trendSparklineKeyboardIndex(2, "Home", buckets), 0);
+  assert.equal(trendSparklineKeyboardIndex(0, "End", buckets), 2);
+  assert.equal(trendSparklineKeyboardIndex(1, "Escape", buckets), null);
+  assert.equal(trendSparklineKeyboardIndex(null, "ArrowRight", []), null);
+});
+
+test("inspector sparkline exposes accessible markup and exported scrubber wiring", () => {
+  assert.match(appSource, /data-inspector-sparkline/);
+  assert.match(appSource, /tabindex="0"/);
+  assert.match(appSource, /role="img"/);
+  assert.match(appSource, /aria-label="\$\{escapeAttr\(`Trend for \$\{topicName\}`\)\}"/);
+  assert.match(appSource, /data-sparkline-readout[^>]+aria-live="polite"/);
+  assert.match(appSource, /data-sparkline-crosshair/);
+  assert.match(appSource, /data-sparkline-scrub-point/);
+  assert.match(appSource, /export function bindInspectorSparklineScrubber/);
+  assert.match(appSource, /export function setInspectorSparklineScrub/);
+  assert.match(appSource, /export function clearInspectorSparklineScrub/);
 });
 
 test("applies date presets against the artifact time extent", () => {

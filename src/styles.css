@@ -370,8 +370,33 @@ mark {
 }
 
 .sparkline-large {
-  height: 52px;
+  height: 56px;
+  margin: 6px 0 4px;
+}
+
+.sparkline-inspector {
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.sparkline-inspector:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.35);
+  outline-offset: 2px;
+}
+
+.inspector-trend {
   margin: 6px 0 12px;
+}
+
+.sparkline-readout {
+  min-height: 18px;
+  line-height: 18px;
+  color: #475569;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sparkline-fill {
@@ -402,6 +427,25 @@ mark {
   stroke-opacity: 0.65;
   stroke-width: 1.75;
   vector-effect: non-scaling-stroke;
+}
+
+.sparkline-crosshair {
+  stroke: #0f172a;
+  stroke-opacity: 0.42;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.sparkline-scrub-point {
+  fill: #1d4ed8;
+  stroke: #fff;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.sparkline-crosshair.is-hidden,
+.sparkline-scrub-point.is-hidden {
+  display: none;
 }
 
 .topic-main em {
