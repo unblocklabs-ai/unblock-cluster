@@ -271,14 +271,71 @@ export function clusterColor(clusterId) {
 }
 
 export function spikeBadge(topic, threshold = 0) {
-  if (!topic?.trend || topic.trend.spikeScore <= threshold || !topic.trend.topBucket) {
+  return windowedSpikeBadge(topic, [], {}, { threshold, bucket: topic?.trend?.bucket });
+}
+
+export function windowedSpikeBadge(topic, buckets = [], filters = {}, options = {}) {
+  const threshold = Number(options.threshold ?? 0);
+  const bucketUnit = options.bucket || topic?.trend?.bucket || "week";
+  const hasWindow = Boolean(filters?.start || filters?.end);
+  if (!hasWindow) {
+    if (!topic?.trend || topic.trend.spikeScore <= threshold || !topic.trend.topBucket) {
+      return null;
+    }
+    return {
+      text: `Spike ${topic.trend.spikeScore.toFixed(1)} · ${trendBucketReadoutLabel(topic.trend.topBucket, bucketUnit, { includeYearWhenDifferent: true, now: options.now })}`,
+      bucket: topic.trend.topBucket,
+      score: topic.trend.spikeScore,
+    };
+  }
+  const windowed = trendWindowBuckets(buckets, filters, { bucket: bucketUnit });
+  if (!windowed.length) {
     return null;
   }
+  const best = windowed.reduce((winner, bucket) => {
+    const score = Number(bucket.spikeScore || 0);
+    if (!winner || score > winner.score) {
+      return { bucket: bucket.bucketStart, score };
+    }
+    return winner;
+  }, null);
+  if (!best || best.score <= threshold || !best.bucket) return null;
   return {
-    text: `Spike ${topic.trend.spikeScore.toFixed(1)} in ${topic.trend.topBucket}`,
-    bucket: topic.trend.topBucket,
-    score: topic.trend.spikeScore,
+    text: `Spike ${best.score.toFixed(1)} · ${trendBucketReadoutLabel(best.bucket, bucketUnit, { includeYearWhenDifferent: true, now: options.now })}`,
+    bucket: best.bucket,
+    score: best.score,
   };
+}
+
+export function trendWindowBuckets(buckets = [], filters = {}, options = {}) {
+  const bucketUnit = options.bucket || "week";
+  const start = parseDateOnly(filters?.start);
+  const end = parseDateOnly(filters?.end);
+  if (!start && !end) return Array.isArray(buckets) ? buckets : [];
+  const windowStart = start ? start.getTime() : -Infinity;
+  const windowEnd = end ? addUtcDays(end, 1).getTime() : Infinity;
+  return (Array.isArray(buckets) ? buckets : []).filter((bucket) => {
+    const bucketStart = parseDateOnly(bucket?.bucketStart);
+    if (!bucketStart) return false;
+    const bucketEnd = bucketEndDate(bucketStart, bucketUnit);
+    return bucketStart.getTime() < windowEnd && bucketEnd.getTime() > windowStart;
+  });
+}
+
+export function compactSourceMix(sourceMix = {}, limit = 2) {
+  const entries = Object.entries(sourceMix || {})
+    .filter(([, count]) => Number.isFinite(Number(count)) && Number(count) > 0)
+    .sort(
+      ([leftSource, leftCount], [rightSource, rightCount]) =>
+        Number(rightCount) - Number(leftCount) || leftSource.localeCompare(rightSource),
+    );
+  if (!entries.length) return "";
+  const visibleLimit = Math.max(1, Math.trunc(Number(limit) || 2));
+  const visible = entries
+    .slice(0, visibleLimit)
+    .map(([source, count]) => `${source} ${formatInteger(count)}`);
+  const remaining = entries.length - visible.length;
+  return remaining > 0 ? `${visible.join(" · ")} · +${remaining} more` : visible.join(" · ");
 }
 
 export function listTopicCell(record, topic) {
@@ -612,7 +669,7 @@ function formatBucketLabel(value) {
   }).format(date);
 }
 
-function trendBucketReadoutLabel(value, bucket) {
+export function trendBucketReadoutLabel(value, bucket, options = {}) {
   const date = parseDateOnly(value);
   if (!date) return String(value || "");
   if (bucket === "month") {
@@ -622,7 +679,9 @@ function trendBucketReadoutLabel(value, bucket) {
       timeZone: "UTC",
     }).format(date);
   }
-  const label = formatBucketLabel(value);
+  const includeYear =
+    options.includeYearWhenDifferent && date.getUTCFullYear() !== currentUtcYear(options.now);
+  const label = includeYear ? formatBucketLabelWithYear(value) : formatBucketLabel(value);
   return bucket === "week" ? `week of ${label}` : label;
 }
 
@@ -664,4 +723,38 @@ function parseDateOnly(value) {
 
 function toDateOnly(date) {
   return date.toISOString().slice(0, 10);
+}
+
+function bucketEndDate(start, bucket) {
+  const end = new Date(start);
+  if (bucket === "day") {
+    end.setUTCDate(end.getUTCDate() + 1);
+  } else if (bucket === "month") {
+    end.setUTCMonth(end.getUTCMonth() + 1);
+  } else {
+    end.setUTCDate(end.getUTCDate() + 7);
+  }
+  return end;
+}
+
+function addUtcDays(date, days) {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function formatBucketLabelWithYear(value) {
+  const date = parseDateOnly(value);
+  if (!date) return String(value || "");
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
+function currentUtcYear(now = new Date()) {
+  const date = now instanceof Date ? now : new Date(now);
+  return Number.isNaN(date.getTime()) ? new Date().getUTCFullYear() : date.getUTCFullYear();
 }

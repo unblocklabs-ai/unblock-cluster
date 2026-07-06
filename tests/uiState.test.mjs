@@ -7,6 +7,7 @@ import {
   applyDatePreset,
   buildViewState,
   clearTopicSelection,
+  compactSourceMix,
   datePresetFilters,
   listRecordTitleCell,
   listTopicCell,
@@ -32,10 +33,12 @@ import {
   trendSparklineParts,
   trendSparklineReadout,
   trendSparklineTitle,
+  trendWindowBuckets,
   updateFilters,
   updateTopicPanel,
   visibleRecords,
   viewSearchParams,
+  windowedSpikeBadge,
 } from "../src/uiState.js";
 
 const appSource = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
@@ -395,14 +398,141 @@ test("resolves representatives and trend spike badge", () => {
     representativeRecords(topic, artifact.data).map((record) => record.id),
     ["r1", "r2"],
   );
-  assert.deepEqual(spikeBadge(topic), {
-    text: "Spike 6.5 in 2025-12-08",
-    bucket: "2025-12-08",
-    score: 6.5,
-  });
+  const badge = spikeBadge(topic);
+  assert.equal(badge.bucket, "2025-12-08");
+  assert.equal(badge.score, 6.5);
+  assert.match(badge.text, /^Spike 6\.5 · week of Dec 8(, 2025)?$/);
   assert.equal(spikeBadge(state.topicById.get(2)), null);
   assert.equal(spikeBadge({ trend: { spikeScore: 0, topBucket: null } }), null);
   assert.equal(spikeBadge({ trend: { spikeScore: -1, topBucket: "2025-01-01" } }), null);
+});
+
+test("windows trend buckets by date intersection", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 3 },
+    { bucketStart: "2025-05-11", count: 4 },
+    { bucketStart: "2025-05-18", count: 5 },
+  ];
+
+  assert.deepEqual(trendWindowBuckets(buckets, {}, { bucket: "week" }), buckets);
+  assert.deepEqual(
+    trendWindowBuckets(buckets, { start: "2025-05-12", end: "" }, { bucket: "week" }),
+    buckets.slice(1),
+  );
+  assert.deepEqual(
+    trendWindowBuckets(buckets, { start: "", end: "2025-05-10" }, { bucket: "week" }),
+    buckets.slice(0, 1),
+  );
+  assert.deepEqual(
+    trendWindowBuckets(buckets, { start: "2025-05-10", end: "2025-05-10" }, { bucket: "week" }),
+    buckets.slice(0, 1),
+  );
+  assert.deepEqual(
+    trendWindowBuckets(buckets, { start: "2025-06-01", end: "2025-06-07" }, { bucket: "week" }),
+    [],
+  );
+});
+
+test("applies trend windowing before leading-zero trim and partial marking", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 0 },
+    { bucketStart: "2025-05-11", count: 0 },
+    { bucketStart: "2025-05-18", count: 8 },
+    { bucketStart: "2025-05-25", count: 3 },
+  ];
+  const windowed = trendWindowBuckets(
+    buckets,
+    { start: "2025-05-11", end: "2025-05-31" },
+    { bucket: "week" },
+  );
+
+  assert.deepEqual(
+    windowed.map((bucket) => bucket.bucketStart),
+    ["2025-05-11", "2025-05-18", "2025-05-25"],
+  );
+  assert.equal(
+    trendSparklinePath(windowed, { width: 10, height: 6, padding: 1 }),
+    "M 1 1 L 9 5",
+  );
+  assert.equal(
+    trendSparklinePartialPath(windowed, {
+      width: 10,
+      height: 6,
+      padding: 1,
+      bucket: "week",
+      minRecordTimestamp: "2025-05-06T12:00:00Z",
+      maxRecordTimestamp: "2025-05-27T12:00:00Z",
+    }),
+    "M 1 1 L 9 5",
+  );
+});
+
+test("builds window-aware spike badges from snapshot or windowed bucket max", () => {
+  const topic = {
+    trend: { bucket: "week", spikeScore: 6.5, topBucket: "2025-12-08" },
+  };
+  const buckets = [
+    { bucketStart: "2025-12-01", count: 10, spikeScore: 2.5 },
+    { bucketStart: "2025-12-08", count: 20, spikeScore: 7.25 },
+    { bucketStart: "2025-12-15", count: 12, spikeScore: 4.5 },
+  ];
+
+  assert.deepEqual(windowedSpikeBadge(topic, buckets, {}, { now: "2025-12-20T00:00:00Z" }), {
+    text: "Spike 6.5 · week of Dec 8",
+    bucket: "2025-12-08",
+    score: 6.5,
+  });
+  assert.deepEqual(
+    windowedSpikeBadge(
+      topic,
+      buckets,
+      { start: "2025-12-01", end: "2025-12-14" },
+      { bucket: "week", now: "2025-12-20T00:00:00Z" },
+    ),
+    {
+      text: "Spike 7.3 · week of Dec 8",
+      bucket: "2025-12-08",
+      score: 7.25,
+    },
+  );
+  assert.equal(
+    windowedSpikeBadge(
+      topic,
+      buckets,
+      { start: "2026-01-01", end: "2026-01-31" },
+      { bucket: "week" },
+    ),
+    null,
+  );
+  assert.equal(
+    windowedSpikeBadge(
+      topic,
+      buckets,
+      { start: "2025-12-15", end: "2025-12-21" },
+      { bucket: "week", threshold: 5 },
+    ),
+    null,
+  );
+});
+
+test("formats compact source mix summaries", () => {
+  assert.equal(compactSourceMix({ chat_transcript: 90 }), "chat_transcript 90");
+  assert.equal(
+    compactSourceMix({ support_ticket: 90, chat_transcript: 90 }),
+    "chat_transcript 90 · support_ticket 90",
+  );
+  assert.equal(
+    compactSourceMix({
+      support_ticket: 90,
+      chat_transcript: 90,
+      product_review: 18,
+      survey: 5,
+      call: 3,
+      email: 2,
+    }),
+    "chat_transcript 90 · support_ticket 90 · +4 more",
+  );
+  assert.equal(compactSourceMix({}), "");
 });
 
 test("renders list topic cells with dots, noise labels, and truncation classes", () => {

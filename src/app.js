@@ -15,6 +15,7 @@ import {
   buildViewState,
   clearTopicSelection,
   clusterColor,
+  compactSourceMix,
   listRecordTitleCell,
   listTopicCell,
   listWindow,
@@ -28,7 +29,6 @@ import {
   selectedTopicExtentRecords,
   showMoreListRecords,
   sentimentCell,
-  spikeBadge,
   trendSparklineKeyboardIndex,
   topicPanelTopics,
   topicLabel,
@@ -36,10 +36,12 @@ import {
   trendSparklinePointAtIndex,
   trendSparklinePointAtX,
   trendSparklineReadout,
+  trendWindowBuckets,
   updateFilters,
   updateTopicPanel,
   visibleRecords,
   viewSearchParams,
+  windowedSpikeBadge,
 } from "./uiState.js";
 import { formatCount, formatCountLabel } from "./formatters.js";
 
@@ -109,7 +111,7 @@ const LAYOUT_PROJECTION = new Projection({
 addProjection(LAYOUT_PROJECTION);
 
 const SPARKLINE_SIZES = {
-  small: { width: 96, height: 24, padding: 3 },
+  small: { width: 180, height: 24, padding: 3 },
   large: { width: 220, height: 56, padding: 4 },
 };
 
@@ -396,20 +398,23 @@ function renderTopics(state, records) {
   const totalNoise = state.artifact.noise?.noiseCount ?? noiseRecords(state.artifact.data).length;
   const topics = topicPanelTopics(state, records)
     .map(({ topic, visibleCount, selected }) => {
-      const badge = spikeBadge(topic);
-      const series = runtime.trends.get(topic.clusterId);
+      const rawSeries = runtime.trends.get(topic.clusterId);
+      const series = windowedTrendSeries(rawSeries);
+      const badge = windowedSpikeBadge(topic, rawSeries, state.filters, {
+        bucket: runtime.trendBucket || topic.trend?.bucket,
+      });
       const sparkline = renderSparkline(series, "small");
       return `
         <button class="topic ${selected ? "selected" : ""}" type="button" data-topic-id="${topic.clusterId}">
           <span class="topic-swatch" style="background:${clusterColor(topic.clusterId)}"></span>
           <span class="topic-main">
             <strong>${escapeHtml(topicLabel(topic))}</strong>
-            <small>${formatCount(visibleCount)}/${formatCount(topic.size)} visible · mean p ${formatNumber(topic.meanProbability)}</small>
+            <small>${formatCount(visibleCount)}/${formatCount(topic.size)} visible</small>
             ${sparkline}
             ${topic.summary ? `<span>${escapeHtml(topic.summary)}</span>` : ""}
             ${topic.coherent === false ? `<em>Low coherence</em>` : ""}
             ${badge ? `<mark>${escapeHtml(badge.text)}</mark>` : ""}
-            <span class="source-mix">${formatSourceMix(topic.sourceMix)}</span>
+            <span class="source-mix">${escapeHtml(compactSourceMix(topic.sourceMix))}</span>
           </span>
         </button>
       `;
@@ -458,17 +463,19 @@ function renderInspector(state, records) {
   }
   const reps = representativeRecords(selectedTopic, state.artifact.data);
   const selectedRecords = records.filter((record) => record.clusterId === selectedTopic.clusterId);
-  const series = runtime.trends.get(selectedTopic.clusterId);
+  const rawSeries = runtime.trends.get(selectedTopic.clusterId);
+  const series = windowedTrendSeries(rawSeries);
   els.emptyState.hidden = true;
   els.details.hidden = false;
   els.details.innerHTML = `
     <h2>${escapeHtml(topicLabel(selectedTopic))}</h2>
-    ${renderSparkline(series, "large", selectedTopic)}
+    ${renderInspectorTrend(rawSeries, series, selectedTopic)}
     ${selectedTopic.summary ? `<p class="wrap-text">${escapeHtml(selectedTopic.summary)}</p>` : ""}
     <dl>
       ${selectedTopic.coherent === false ? `<dt>Coherence</dt><dd>Low</dd>` : ""}
       <dt>Visible records</dt><dd>${formatCount(selectedRecords.length)}</dd>
       <dt>Total records</dt><dd>${formatCount(selectedTopic.size)}</dd>
+      <dt>Mean probability</dt><dd>${formatNumber(selectedTopic.meanProbability)}</dd>
       <dt>Source mix</dt><dd>${formatSourceMix(selectedTopic.sourceMix)}</dd>
     </dl>
     ${renderFacetControls(state, selectedTopic)}
@@ -1008,6 +1015,23 @@ function sparklineOptions(size) {
   };
 }
 
+function windowedTrendSeries(buckets) {
+  return trendWindowBuckets(buckets || [], runtime.state?.filters || {}, {
+    bucket: runtime.trendBucket || "week",
+  });
+}
+
+function renderInspectorTrend(rawSeries, series, selectedTopic) {
+  if (rawSeries?.length && !series.length) {
+    return `
+      <div class="inspector-trend">
+        <div class="sparkline-readout" data-sparkline-readout aria-live="polite">No trend data in the selected range</div>
+      </div>
+    `;
+  }
+  return renderSparkline(series, "large", selectedTopic);
+}
+
 export function bindInspectorSparklineScrubber(svg, buckets, options = {}) {
   if (!svg || !buckets?.length) return;
   const readout = svg.parentElement?.querySelector("[data-sparkline-readout]");
@@ -1102,7 +1126,7 @@ function renderFacetControls(state, selectedTopic) {
     <section class="facet-panel">
       <label>
         <span>Facet</span>
-        <select data-facet-selector aria-label="Facet topic records">
+        <select id="facetSelector" name="facetSelector" data-facet-selector aria-label="Facet topic records">
           <option value="">Choose facet</option>
           ${fields
             .map(
