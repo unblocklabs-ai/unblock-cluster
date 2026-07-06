@@ -16,6 +16,7 @@ Public surface:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import re
@@ -95,10 +96,8 @@ class WS:
         self.sock.sendall(b"\x8a" + bytes([0x80 | len(data)]) + mask + masked)
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(OSError):
             self.sock.close()
-        except OSError:
-            pass
 
     def _read_exact(self, n: int) -> bytes:
         while len(self.buf) < n:
@@ -193,14 +192,12 @@ class Browser:
         target.write_bytes(base64.b64decode(data))
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.ws.close()
-        except Exception:
-            pass
         try:
             self.proc.terminate()
             self.proc.wait(timeout=5)
-        except Exception:
+        except (OSError, subprocess.TimeoutExpired):
             self.proc.kill()
         self.profile.cleanup()
 
@@ -228,10 +225,11 @@ class Browser:
             self.console.append({"type": params.get("type"), "text": text, "raw": params})
         elif method == "Runtime.exceptionThrown":
             details = params.get("exceptionDetails", {})
+            description = details.get("exception", {}).get("description", "")
             self.console.append(
                 {
                     "type": "error",
-                    "text": details.get("text") or details.get("exception", {}).get("description", ""),
+                    "text": details.get("text") or description,
                     "raw": params,
                 }
             )

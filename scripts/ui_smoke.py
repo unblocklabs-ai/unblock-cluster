@@ -16,14 +16,15 @@ Python packages.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ui_probe import Browser
-
 
 OUT = Path("output/ui-smoke")
 READOUT_RE = re.compile(r"^\d[\d,]* records? · week of .+")
@@ -86,8 +87,16 @@ def scenario_boot(browser: Browser, base_url: str) -> None:
         "document.querySelector('#workspace') && !document.querySelector('#workspace').hidden",
         "workspace visible",
     )
-    wait_js(browser, "document.querySelectorAll('#topicList [data-topic-id]').length > 0", "topics listed")
-    wait_js(browser, "document.querySelectorAll('#topicList .sparkline-small').length > 0", "topic sparklines")
+    wait_js(
+        browser,
+        "document.querySelectorAll('#topicList [data-topic-id]').length > 0",
+        "topics listed",
+    )
+    wait_js(
+        browser,
+        "document.querySelectorAll('#topicList .sparkline-small').length > 0",
+        "topic sparklines",
+    )
     browser.shot(OUT / "02-workspace-polished-cards.png")
 
 
@@ -106,7 +115,11 @@ def scenario_form_hygiene(browser: Browser) -> None:
 
 def scenario_scrubber(browser: Browser) -> None:
     click_selector(browser, "#topicList [data-topic-id]")
-    wait_js(browser, "!!document.querySelector('[data-inspector-sparkline]')", "inspector sparkline")
+    wait_js(
+        browser,
+        "!!document.querySelector('[data-inspector-sparkline]')",
+        "inspector sparkline",
+    )
     wait_js(
         browser,
         "document.querySelector('[data-sparkline-readout]')?.dataset.defaultReadout",
@@ -116,7 +129,10 @@ def scenario_scrubber(browser: Browser) -> None:
     rect = element_rect(browser, "[data-inspector-sparkline]")
     readouts: list[str] = []
     for fraction in (0.2, 0.5, 0.8):
-        browser.mouse_move(rect["left"] + rect["width"] * fraction, rect["top"] + rect["height"] / 2)
+        browser.mouse_move(
+            rect["left"] + rect["width"] * fraction,
+            rect["top"] + rect["height"] / 2,
+        )
         time.sleep(0.15)
         text = readout(browser)
         if not READOUT_RE.match(text):
@@ -128,7 +144,8 @@ def scenario_scrubber(browser: Browser) -> None:
         """
         (() => {
           const el = document.querySelector('[data-sparkline-crosshair]');
-          return !!el && !el.classList.contains('is-hidden') && getComputedStyle(el).display !== 'none';
+          return !!el && !el.classList.contains('is-hidden')
+            && getComputedStyle(el).display !== 'none';
         })()
         """
     )
@@ -177,7 +194,11 @@ def scenario_date_window(browser: Browser) -> None:
     browser.shot(OUT / "06-date-7d.png")
 
     click_selector(browser, '[data-date-preset="all"]')
-    wait_for(browser, lambda: trend_state(browser)["path"] == before["path"], "All path restoration")
+    wait_for(
+        browser,
+        lambda: trend_state(browser)["path"] == before["path"],
+        "All path restoration",
+    )
     restored = trend_state(browser)
     if restored["caption"] != before["caption"]:
         raise SmokeFailure("All preset did not restore inspector caption")
@@ -242,7 +263,8 @@ def element_rect(browser: Browser, selector: str) -> dict[str, float]:
 
 
 def readout(browser: Browser) -> str:
-    return str(browser.js("document.querySelector('[data-sparkline-readout]')?.textContent.trim()") or "")
+    expr = "document.querySelector('[data-sparkline-readout]')?.textContent.trim()"
+    return str(browser.js(expr) or "")
 
 
 def assert_default_readout(browser: Browser, action: str) -> None:
@@ -300,10 +322,8 @@ def send_key(browser: Browser, key: str) -> None:
 
 
 def safe_shot(browser: Browser, path: Path) -> None:
-    try:
+    with contextlib.suppress(Exception):
         browser.shot(path)
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":
