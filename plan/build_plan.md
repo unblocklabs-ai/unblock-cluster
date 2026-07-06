@@ -717,6 +717,35 @@ Ordered; top item is the next phase candidate.
 
 ## Amendments
 
+**2026-07-05 (k)** (Phase 21b — production miss and its systemic fix).
+Phase 21's spike gate was verified on fresh demo runs and declared fixed in
+production — but spike scores live in PERSISTED trend_results; production
+graphs kept serving old-math badges until a trend re-run. Process rules:
+changes to the meaning of persisted run outputs must be verified against
+the stale-data path, and ship notes must state re-run requirements; bible
+edits must use verified-match tooling (this amendment chain itself broke
+twice via unchecked replaces — (j) and (k) silently failed to insert, and
+PR #37 carrying (i) sat unmerged). Systemic fix: TREND_MATH_VERSION
+persisted in trend-run stats (v2 = the spike gate; pre-versioning runs
+read as v1); topics/trends/artifact reads warn through the existing
+warnings channel when persisted trend data predates current math, naming
+the recompute endpoint. Also fixed the second chart artifact from the same
+screenshots: partial FIRST buckets (data starting mid-bucket) render
+dashed/hollow like Phase 18's partial final buckets, with "(partial)" in
+the sparkline title.
+
+**2026-07-05 (j)** (Bek's UI review — Phase 21). Spike-score integrity:
+series-start buckets have no baseline (mean 0, floor 1) so their spike
+score equaled the raw count — every topic's badge showed its first week of
+data. Decision: gate spike scores on SERIES POSITION (first 3 buckets
+score 0.0), NOT on baseline emptiness — late-emerging topics have a
+baseline of zeros and their first-burst spikes are meaningful (the planted
+December spike, 69.0, depends on that and survived as the regression
+gate). Also: list-view polish (topic color dots, single-line truncation,
+nowrap columns, sentiment glyphs, "Noise" rows), provenance chips
+collapsed behind a disclosure, search placeholder, coherence row
+only-when-flagged, DATAGRAPH_INLINE_CPU_RUNS env toggle (default off).
+
 **2026-07-05 (i)** (Perelel repo-level feedback — labeling representation
 drift, CONFIRMED bug). Summary-backed clustering embeds
 record_summaries.rendered_text, but label runs load raw
