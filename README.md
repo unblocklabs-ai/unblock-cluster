@@ -28,6 +28,26 @@ on Python 3.14.
 The demo above is fully offline. Running the real pipeline (OpenAI embeddings
 and topic labeling) requires `OPENAI_API_KEY` in the server's environment.
 
+### UI Verification
+
+The local smoke suite drives a real headless Chromium over CDP and assumes the
+offline demo data is already seeded and served:
+
+```sh
+.venv/bin/python scripts/demo_seed.py
+DATAGRAPH_DATA_DIR=output/demo-data .venv/bin/python -m datagraph.main
+```
+
+In another shell:
+
+```sh
+python scripts/ui_smoke.py
+```
+
+Set `DATAGRAPH_CHROME_BIN=/path/to/chrome-headless-shell` if the browser is not
+under the Playwright cache or on `PATH` as `google-chrome`/`chromium`.
+Screenshots are written to `output/ui-smoke/`.
+
 ## Serve Modes
 
 Production/local backend mode:

@@ -717,6 +717,24 @@ Ordered; top item is the next phase candidate.
 
 ## Amendments
 
+**2026-07-06 (l)** (Phase 23 — date-windowed trends, UI verification harness,
+chart-library decision). Trend charts now derive from the selected date range
+client-side: `trendWindowBuckets` keeps any bucket whose span intersects
+[start, end] (windowing happens BEFORE leading-zero trim and partial marking —
+dashed means incomplete data, never window cropping), and spike badges become
+window-aware (in-window bucket max when a range is active; persisted snapshot
+otherwise). Bucket counts are never re-aggregated to sub-bucket ranges — bucket
+granularity is the windowing unit. DECISION: chart-library adoption was
+evaluated and REJECTED; sparkline + crosshair scrub + readout needs are met by
+tested vanilla SVG, runtime dependencies stay exactly `ol`. New standing
+verification instrument: `scripts/ui_probe.py` (stdlib-only CDP client over a
+hand-rolled WebSocket; resolves DATAGRAPH_CHROME_BIN, then playwright-cache
+chrome-headless-shell, then PATH) and `scripts/ui_smoke.py` (boot, form-field
+hygiene, scrubber, date-window reactivity, console hygiene — exits non-zero on
+any failure). The smoke suite is the acceptance gate for interactive UI work;
+plain `chrome --headless` is unreliable (can hang for whole sessions) and is
+no longer the sanctioned verification path. Local-only: not wired into CI.
+
 **2026-07-05 (k)** (Phase 21b — production miss and its systemic fix).
 Phase 21's spike gate was verified on fresh demo runs and declared fixed in
 production — but spike scores live in PERSISTED trend_results; production
