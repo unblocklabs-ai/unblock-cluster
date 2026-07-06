@@ -359,7 +359,80 @@ export function trendSparklineParts(buckets = [], options = {}) {
     title: trendSparklineTitle(buckets, options),
     partialPoint: partialPoints[partialPoints.length - 1] || null,
     partialPoints,
+    bucketPoints: prepared.bucketPoints,
+    buckets: prepared.buckets,
   };
+}
+
+export function trendSparklineBucketIndexAtX(buckets = [], x = 0, options = {}) {
+  const prepared = prepareSparkline(buckets, options);
+  const count = prepared.buckets.length;
+  if (!count) return null;
+  if (count === 1) return 0;
+  const width = positiveNumber(options.width, 96);
+  const padding = Math.max(0, Number(options.padding ?? 2));
+  const usableWidth = Math.max(1, width - padding * 2);
+  const clampedX = Math.min(width - padding, Math.max(padding, Number(x) || 0));
+  const ratio = (clampedX - padding) / usableWidth;
+  return Math.min(count - 1, Math.max(0, Math.round(ratio * (count - 1))));
+}
+
+export function trendSparklinePointAtIndex(buckets = [], index = 0, options = {}) {
+  const prepared = prepareSparkline(buckets, options);
+  if (!prepared.buckets.length) return null;
+  const clampedIndex = clampIndex(index, prepared.buckets.length);
+  return {
+    index: clampedIndex,
+    bucket: prepared.buckets[clampedIndex],
+    point: prepared.bucketPoints[clampedIndex],
+    partial: isPreparedBucketPartial(prepared, clampedIndex),
+  };
+}
+
+export function trendSparklinePointAtX(buckets = [], x = 0, options = {}) {
+  const index = trendSparklineBucketIndexAtX(buckets, x, options);
+  return index === null ? null : trendSparklinePointAtIndex(buckets, index, options);
+}
+
+export function trendSparklineKeyboardIndex(currentIndex, key, buckets = [], options = {}) {
+  const prepared = prepareSparkline(buckets, options);
+  const count = prepared.buckets.length;
+  if (!count) return null;
+  if (key === "Escape") return null;
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key === "ArrowRight") {
+    return currentIndex === null || currentIndex === undefined
+      ? 0
+      : clampIndex(Number(currentIndex) + 1, count);
+  }
+  if (key === "ArrowLeft") {
+    return currentIndex === null || currentIndex === undefined
+      ? count - 1
+      : clampIndex(Number(currentIndex) - 1, count);
+  }
+  return currentIndex === null || currentIndex === undefined
+    ? null
+    : clampIndex(Number(currentIndex), count);
+}
+
+export function trendSparklineReadout(buckets = [], index = 0, options = {}) {
+  const detail = trendSparklinePointAtIndex(buckets, index, options);
+  if (!detail) return "";
+  return formatTrendBucketReadout(detail.bucket, {
+    bucket: options.bucket,
+    partial: detail.partial,
+  });
+}
+
+export function formatTrendBucketReadout(bucket, options = {}) {
+  if (!bucket) return "";
+  const count = formatCountLabelLocal(bucket.count, "record");
+  const label = trendBucketReadoutLabel(bucket.bucketStart, options.bucket);
+  const partial = options.partial ? " (partial)" : "";
+  const spikeScore = Number(bucket.spikeScore || 0);
+  const spike = spikeScore > 0 ? ` · spike ${spikeScore.toFixed(1)}` : "";
+  return `${count} · ${label}${partial}${spike}`;
 }
 
 export function datePresetFilters(timeExtent, preset) {
@@ -480,9 +553,14 @@ function prepareSparkline(buckets = [], options = {}) {
           const y = padding + usableHeight * (1 - ratio);
           return { x, y };
         });
+  const bucketPoints =
+    values.length === 1
+      ? [{ x: width / 2, y: height / 2 }]
+      : points.map((point) => ({ ...point }));
   return {
     buckets: trimmed,
     points,
+    bucketPoints,
     firstBucketPartial: isFirstBucketPartial(trimmed[0], options),
     finalBucketPartial: isFinalBucketPartial(trimmed[trimmed.length - 1], options),
   };
@@ -534,8 +612,27 @@ function formatBucketLabel(value) {
   }).format(date);
 }
 
+function trendBucketReadoutLabel(value, bucket) {
+  const date = parseDateOnly(value);
+  if (!date) return String(value || "");
+  if (bucket === "month") {
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    }).format(date);
+  }
+  const label = formatBucketLabel(value);
+  return bucket === "week" ? `week of ${label}` : label;
+}
+
 function formatInteger(value) {
   return Math.trunc(Number(value) || 0).toLocaleString("en-US");
+}
+
+function formatCountLabelLocal(value, singular, plural = `${singular}s`) {
+  const count = Math.trunc(Number(value) || 0);
+  return `${formatInteger(count)} ${count === 1 ? singular : plural}`;
 }
 
 function positiveNumber(value, fallback) {
@@ -545,6 +642,18 @@ function positiveNumber(value, fallback) {
 
 function roundPath(value) {
   return Math.round(value * 100) / 100;
+}
+
+function clampIndex(index, count) {
+  if (!Number.isFinite(index)) return 0;
+  return Math.min(count - 1, Math.max(0, Math.trunc(index)));
+}
+
+function isPreparedBucketPartial(prepared, index) {
+  return (
+    (index === 0 && prepared.firstBucketPartial) ||
+    (index === prepared.buckets.length - 1 && prepared.finalBucketPartial)
+  );
 }
 
 function parseDateOnly(value) {

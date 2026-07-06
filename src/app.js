@@ -29,9 +29,13 @@ import {
   showMoreListRecords,
   sentimentCell,
   spikeBadge,
+  trendSparklineKeyboardIndex,
   topicPanelTopics,
   topicLabel,
   trendSparklineParts,
+  trendSparklinePointAtIndex,
+  trendSparklinePointAtX,
+  trendSparklineReadout,
   updateFilters,
   updateTopicPanel,
   visibleRecords,
@@ -103,6 +107,11 @@ const LAYOUT_PROJECTION = new Projection({
   units: "pixels",
 });
 addProjection(LAYOUT_PROJECTION);
+
+const SPARKLINE_SIZES = {
+  small: { width: 96, height: 24, padding: 3 },
+  large: { width: 220, height: 56, padding: 4 },
+};
 
 if (typeof window !== "undefined") {
   window.addEventListener("DOMContentLoaded", () => {
@@ -454,7 +463,7 @@ function renderInspector(state, records) {
   els.details.hidden = false;
   els.details.innerHTML = `
     <h2>${escapeHtml(topicLabel(selectedTopic))}</h2>
-    ${renderSparkline(series, "large")}
+    ${renderSparkline(series, "large", selectedTopic)}
     ${selectedTopic.summary ? `<p class="wrap-text">${escapeHtml(selectedTopic.summary)}</p>` : ""}
     <dl>
       ${selectedTopic.coherent === false ? `<dt>Coherence</dt><dd>Low</dd>` : ""}
@@ -471,6 +480,11 @@ function renderInspector(state, records) {
   els.details.querySelectorAll("[data-record-id]").forEach((button) => {
     button.addEventListener("click", () => selectRecordAndRender(button.dataset.recordId));
   });
+  bindInspectorSparklineScrubber(
+    els.details.querySelector("[data-inspector-sparkline]"),
+    series,
+    sparklineOptions("large"),
+  );
   els.details.querySelector("[data-facet-selector]")?.addEventListener("change", (event) => {
     runtime.facetField = event.target.value;
     runtime.facetStatus = runtime.facetField ? "loading" : "idle";
@@ -950,22 +964,16 @@ async function fetchTrendsOnce() {
   }
 }
 
-function renderSparkline(buckets, size) {
+function renderSparkline(buckets, size, topic = null) {
   if (!buckets?.length) return "";
-  const width = size === "large" ? 220 : 96;
-  const height = size === "large" ? 52 : 24;
-  const parts = trendSparklineParts(buckets, {
-    width,
-    height,
-    padding: 3,
-    bucket: runtime.trendBucket,
-    minRecordTimestamp: runtime.state?.minRecordTimestamp,
-    maxRecordTimestamp: runtime.state?.maxRecordTimestamp,
-  });
+  const { width, height } = SPARKLINE_SIZES[size] || SPARKLINE_SIZES.small;
+  const options = sparklineOptions(size);
+  const parts = trendSparklineParts(buckets, options);
   if (!parts.linePath) return "";
   const fillPath = parts.fullPath || parts.linePath;
-  return `
-    <svg class="sparkline sparkline-${size}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Topic trend sparkline">
+  if (size !== "large") {
+    return `
+    <svg class="sparkline sparkline-small" viewBox="0 0 ${width} ${height}" role="img" aria-label="Topic trend sparkline">
       <title>${escapeHtml(parts.title)}</title>
       <path class="sparkline-fill" d="${escapeAttr(fillPath)} L ${width - 3} ${height - 3} L 3 ${height - 3} Z"></path>
       <path class="sparkline-line" d="${escapeAttr(parts.linePath)}"></path>
@@ -973,6 +981,104 @@ function renderSparkline(buckets, size) {
       ${(parts.partialPoints || []).map((point) => `<circle class="sparkline-partial-point" cx="${roundSvg(point.x)}" cy="${roundSvg(point.y)}" r="2.75"></circle>`).join("")}
     </svg>
   `;
+  }
+  const topicName = topic ? topicLabel(topic) : "topic";
+  return `
+    <div class="inspector-trend">
+      <svg class="sparkline sparkline-large sparkline-inspector" viewBox="0 0 ${width} ${height}" role="img" tabindex="0" aria-label="${escapeAttr(`Trend for ${topicName}`)}" data-inspector-sparkline>
+        <path class="sparkline-fill" d="${escapeAttr(fillPath)} L ${width - options.padding} ${height - options.padding} L ${options.padding} ${height - options.padding} Z"></path>
+        <path class="sparkline-line" d="${escapeAttr(parts.linePath)}"></path>
+        ${parts.partialPath ? `<path class="sparkline-partial" d="${escapeAttr(parts.partialPath)}"></path>` : ""}
+        ${(parts.partialPoints || []).map((point) => `<circle class="sparkline-partial-point" cx="${roundSvg(point.x)}" cy="${roundSvg(point.y)}" r="2.75"></circle>`).join("")}
+        <line class="sparkline-crosshair is-hidden" data-sparkline-crosshair x1="0" x2="0" y1="${options.padding}" y2="${height - options.padding}"></line>
+        <circle class="sparkline-scrub-point is-hidden" data-sparkline-scrub-point cx="0" cy="0" r="3.25"></circle>
+      </svg>
+      <div class="sparkline-readout" data-sparkline-readout data-default-readout="${escapeAttr(parts.title)}" aria-live="polite"></div>
+    </div>
+  `;
+}
+
+function sparklineOptions(size) {
+  const dimensions = SPARKLINE_SIZES[size] || SPARKLINE_SIZES.small;
+  return {
+    ...dimensions,
+    bucket: runtime.trendBucket,
+    minRecordTimestamp: runtime.state?.minRecordTimestamp,
+    maxRecordTimestamp: runtime.state?.maxRecordTimestamp,
+  };
+}
+
+export function bindInspectorSparklineScrubber(svg, buckets, options = {}) {
+  if (!svg || !buckets?.length) return;
+  const readout = svg.parentElement?.querySelector("[data-sparkline-readout]");
+  const crosshair = svg.querySelector("[data-sparkline-crosshair]");
+  const point = svg.querySelector("[data-sparkline-scrub-point]");
+  const defaultReadout = readout?.dataset.defaultReadout || "";
+  if (!readout || !crosshair || !point) return;
+  readout.textContent = defaultReadout;
+
+  const activateFromEvent = (event) => {
+    const rect = svg.getBoundingClientRect();
+    const viewBoxWidth = options.width || 1;
+    const x = rect.width > 0 ? ((event.clientX - rect.left) / rect.width) * viewBoxWidth : 0;
+    const detail = trendSparklinePointAtX(buckets, x, options);
+    setInspectorSparklineScrub(svg, buckets, detail?.index ?? null, options);
+  };
+
+  svg.addEventListener("pointermove", activateFromEvent);
+  svg.addEventListener("pointerdown", (event) => {
+    activateFromEvent(event);
+    svg.focus();
+  });
+  svg.addEventListener("pointerleave", () => {
+    clearInspectorSparklineScrub(svg, defaultReadout);
+  });
+  svg.addEventListener("focus", () => {
+    if (!svg.dataset.activeBucketIndex) {
+      setInspectorSparklineScrub(svg, buckets, 0, options);
+    }
+  });
+  svg.addEventListener("keydown", (event) => {
+    const keys = new Set(["ArrowLeft", "ArrowRight", "Home", "End", "Escape"]);
+    if (!keys.has(event.key)) return;
+    event.preventDefault();
+    const currentIndex = svg.dataset.activeBucketIndex
+      ? Number(svg.dataset.activeBucketIndex)
+      : null;
+    const nextIndex = trendSparklineKeyboardIndex(currentIndex, event.key, buckets, options);
+    if (nextIndex === null) {
+      clearInspectorSparklineScrub(svg, defaultReadout);
+      return;
+    }
+    setInspectorSparklineScrub(svg, buckets, nextIndex, options);
+  });
+}
+
+export function setInspectorSparklineScrub(svg, buckets, index, options = {}) {
+  if (!svg || index === null || index === undefined) return;
+  const detail = trendSparklinePointAtIndex(buckets, index, options);
+  if (!detail) return;
+  const readout = svg.parentElement?.querySelector("[data-sparkline-readout]");
+  const crosshair = svg.querySelector("[data-sparkline-crosshair]");
+  const point = svg.querySelector("[data-sparkline-scrub-point]");
+  if (!readout || !crosshair || !point) return;
+  svg.dataset.activeBucketIndex = String(detail.index);
+  crosshair.setAttribute("x1", roundSvg(detail.point.x));
+  crosshair.setAttribute("x2", roundSvg(detail.point.x));
+  crosshair.classList.remove("is-hidden");
+  point.setAttribute("cx", roundSvg(detail.point.x));
+  point.setAttribute("cy", roundSvg(detail.point.y));
+  point.classList.remove("is-hidden");
+  readout.textContent = trendSparklineReadout(buckets, detail.index, options);
+}
+
+export function clearInspectorSparklineScrub(svg, defaultReadout = "") {
+  if (!svg) return;
+  delete svg.dataset.activeBucketIndex;
+  svg.querySelector("[data-sparkline-crosshair]")?.classList.add("is-hidden");
+  svg.querySelector("[data-sparkline-scrub-point]")?.classList.add("is-hidden");
+  const readout = svg.parentElement?.querySelector("[data-sparkline-readout]");
+  if (readout) readout.textContent = defaultReadout;
 }
 
 function renderFacetControls(state, selectedTopic) {
