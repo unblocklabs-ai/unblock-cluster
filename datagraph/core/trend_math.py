@@ -8,6 +8,12 @@ from typing import Literal
 
 Bucket = Literal["day", "week", "month"]
 
+# Bump ONLY when persisted trend outputs change meaning and older persisted
+# runs should be recomputed before their scores are trusted.
+# v1: initial persisted trend math before explicit version tracking.
+# v2: Phase 21 spike gate zeros spike scores for the first 3 series buckets.
+TREND_MATH_VERSION = 2
+
 # Initial buckets have too little prior series history for a meaningful spike score.
 # The gate is by zero-based series position, not by baseline contents, so topics
 # that emerge after this point still score against their prior zero-filled baseline.

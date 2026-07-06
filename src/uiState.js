@@ -43,10 +43,11 @@ export function buildViewState(artifact, options = {}) {
   const timestamps = (artifact?.data || [])
     .map((record) => Date.parse(record.timestamp))
     .filter((value) => Number.isFinite(value));
+  const minRecordTimestamp = timestamps.length ? Math.min(...timestamps) : null;
   const maxRecordTimestamp = timestamps.length ? Math.max(...timestamps) : null;
   const timeExtent = timestamps.length
     ? {
-        min: new Date(Math.min(...timestamps)).toISOString().slice(0, 10),
+        min: new Date(minRecordTimestamp).toISOString().slice(0, 10),
         max: new Date(maxRecordTimestamp).toISOString().slice(0, 10),
       }
     : { min: "", max: "" };
@@ -57,6 +58,7 @@ export function buildViewState(artifact, options = {}) {
     recordById,
     sourceTypes,
     timeExtent,
+    minRecordTimestamp,
     maxRecordTimestamp,
     filters: {
       query: options.query || "",
@@ -329,22 +331,34 @@ export function trendSparklineTitle(buckets = [], options = {}) {
   );
   const first = prepared.buckets[0];
   const last = prepared.buckets[prepared.buckets.length - 1];
-  return `${formatBucketLabel(first.bucketStart)} – ${formatBucketLabel(last.bucketStart)} · peak ${formatInteger(peak.count)} (${formatBucketLabel(peak.bucketStart)})`;
+  const startLabel = `${prepared.firstBucketPartial ? "(partial) " : ""}${formatBucketLabel(first.bucketStart)}`;
+  const endLabel = `${formatBucketLabel(last.bucketStart)}${prepared.finalBucketPartial ? " (partial)" : ""}`;
+  return `${startLabel} – ${endLabel} · peak ${formatInteger(peak.count)} (${formatBucketLabel(peak.bucketStart)})`;
 }
 
 export function trendSparklineParts(buckets = [], options = {}) {
   const prepared = prepareSparkline(buckets, options);
   const points = prepared.points;
   if (!points.length) return { linePath: "", partialPath: "", title: "" };
-  const partial = prepared.finalBucketPartial && points.length > 1;
-  const linePoints = partial ? points.slice(0, -1) : points;
+  const firstPartial = prepared.firstBucketPartial && points.length > 1;
+  const finalPartial = prepared.finalBucketPartial && points.length > 1;
+  const linePoints = points.slice(firstPartial ? 1 : 0, finalPartial ? -1 : points.length);
   const linePath = pointsToPath(linePoints);
-  const partialPath = partial ? pointsToPath(points.slice(-2)) : "";
+  const partialSegments = [
+    firstPartial ? pointsToPath(points.slice(0, 2)) : "",
+    finalPartial ? pointsToPath(points.slice(-2)) : "",
+  ].filter(Boolean);
+  const partialPoints = [
+    firstPartial ? points[0] : null,
+    finalPartial ? points[points.length - 1] : null,
+  ].filter(Boolean);
   return {
     linePath,
-    partialPath,
+    fullPath: pointsToPath(points),
+    partialPath: partialSegments.join(" "),
     title: trendSparklineTitle(buckets, options),
-    partialPoint: prepared.finalBucketPartial ? points[points.length - 1] : null,
+    partialPoint: partialPoints[partialPoints.length - 1] || null,
+    partialPoints,
   };
 }
 
@@ -444,7 +458,7 @@ function prepareSparkline(buckets = [], options = {}) {
     }))
     .filter((bucket) => Number.isFinite(bucket.count));
   if (!finiteBuckets.length) {
-    return { buckets: [], points: [], finalBucketPartial: false };
+    return { buckets: [], points: [], firstBucketPartial: false, finalBucketPartial: false };
   }
   const firstNonzero = finiteBuckets.findIndex((bucket) => bucket.count > 0);
   const trimmed = firstNonzero === -1 ? finiteBuckets : finiteBuckets.slice(firstNonzero);
@@ -469,6 +483,7 @@ function prepareSparkline(buckets = [], options = {}) {
   return {
     buckets: trimmed,
     points,
+    firstBucketPartial: isFirstBucketPartial(trimmed[0], options),
     finalBucketPartial: isFinalBucketPartial(trimmed[trimmed.length - 1], options),
   };
 }
@@ -499,6 +514,14 @@ function isFinalBucketPartial(bucket, options) {
     return false;
   }
   return end.getTime() > maxTimestamp.getTime();
+}
+
+function isFirstBucketPartial(bucket, options) {
+  if (!bucket?.bucketStart || !options.minRecordTimestamp || !options.bucket) return false;
+  const start = parseDateOnly(bucket.bucketStart);
+  const minTimestamp = new Date(options.minRecordTimestamp);
+  if (!start || Number.isNaN(minTimestamp.getTime())) return false;
+  return start.getTime() < minTimestamp.getTime();
 }
 
 function formatBucketLabel(value) {

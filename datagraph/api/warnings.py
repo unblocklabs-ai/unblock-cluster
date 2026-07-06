@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from datagraph.core.trend_math import TREND_MATH_VERSION
 from datagraph.db import fetch_one
 
 
@@ -60,7 +61,7 @@ def resolved_run_warnings(
         trend_run = fetch_one(
             conn,
             """
-            SELECT input_refs_json
+            SELECT id, input_refs_json, stats_json
               FROM runs
              WHERE id = ? AND graph_id = ? AND view_id = ?
                AND type = 'trend' AND status = 'succeeded'
@@ -75,5 +76,23 @@ def resolved_run_warnings(
                     f"{trended_cluster_run_id}; resolved cluster run is {cluster_run_id}, "
                     "so trend snapshots are absent"
                 )
+            warnings.extend(trend_math_version_warnings(trend_run, graph_id, view_id))
 
     return warnings
+
+
+def trend_math_version_warnings(
+    trend_run: dict[str, Any],
+    graph_id: str,
+    view_id: str,
+) -> list[str]:
+    stats = json.loads(trend_run["stats_json"] or "{}")
+    math_version = stats.get("mathVersion")
+    old_version = math_version if isinstance(math_version, int) else 1
+    if old_version >= TREND_MATH_VERSION:
+        return []
+    return [
+        f"trend run {trend_run['id']} was computed with older trend math "
+        f"(v{old_version} < v{TREND_MATH_VERSION}); "
+        f"POST /api/graphs/{graph_id}/views/{view_id}/trends to recompute spike scores"
+    ]

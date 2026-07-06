@@ -12,7 +12,12 @@ from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
 from datagraph.core.time import parse_timestamp
-from datagraph.core.trend_math import MIN_BASELINE_BUCKETS, bucket_start, compute_trends
+from datagraph.core.trend_math import (
+    MIN_BASELINE_BUCKETS,
+    TREND_MATH_VERSION,
+    bucket_start,
+    compute_trends,
+)
 from datagraph.db import connect
 from datagraph.main import create_app
 from scripts.gen_synthetic import generate_records
@@ -230,6 +235,8 @@ def test_trend_api_validation_snapshots_integrity_and_determinism(tmp_path: Path
         )
         assert first_run["status"] == "succeeded"
         assert second_run["status"] == "succeeded"
+        assert first_run["stats"]["mathVersion"] == TREND_MATH_VERSION
+        assert second_run["stats"]["mathVersion"] == TREND_MATH_VERSION
         assert first_run["stats"]["bucket"] == "week"
         assert first_run["stats"]["window"] == {"start": "2025-12-01", "end": "2025-12-29"}
 
@@ -243,6 +250,7 @@ def test_trend_api_validation_snapshots_integrity_and_determinism(tmp_path: Path
         assert trends["trendRunId"] == second_run["id"]
         assert trends["clusterRunId"] == cluster_run_id
         assert trends["bucket"] == "week"
+        assert trends["warnings"] == []
         assert trends["series"]
         assert all("label" in series for series in trends["series"])
         assert _comparable_trends(trends) == _comparable_trends(

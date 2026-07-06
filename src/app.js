@@ -959,17 +959,18 @@ function renderSparkline(buckets, size) {
     height,
     padding: 3,
     bucket: runtime.trendBucket,
+    minRecordTimestamp: runtime.state?.minRecordTimestamp,
     maxRecordTimestamp: runtime.state?.maxRecordTimestamp,
   });
   if (!parts.linePath) return "";
-  const fillPath = `${parts.linePath}${parts.partialPath ? ` ${parts.partialPath.replace(/^M /, "L ")}` : ""}`;
+  const fillPath = parts.fullPath || parts.linePath;
   return `
     <svg class="sparkline sparkline-${size}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Topic trend sparkline">
       <title>${escapeHtml(parts.title)}</title>
       <path class="sparkline-fill" d="${escapeAttr(fillPath)} L ${width - 3} ${height - 3} L 3 ${height - 3} Z"></path>
       <path class="sparkline-line" d="${escapeAttr(parts.linePath)}"></path>
       ${parts.partialPath ? `<path class="sparkline-partial" d="${escapeAttr(parts.partialPath)}"></path>` : ""}
-      ${parts.partialPoint ? `<circle class="sparkline-partial-point" cx="${roundSvg(parts.partialPoint.x)}" cy="${roundSvg(parts.partialPoint.y)}" r="2.75"></circle>` : ""}
+      ${(parts.partialPoints || []).map((point) => `<circle class="sparkline-partial-point" cx="${roundSvg(point.x)}" cy="${roundSvg(point.y)}" r="2.75"></circle>`).join("")}
     </svg>
   `;
 }

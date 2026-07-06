@@ -717,6 +717,56 @@ Ordered; top item is the next phase candidate.
 
 ## Amendments
 
+**2026-07-05 (k)** (Phase 21b — production miss and its systemic fix).
+Phase 21's spike gate was verified on fresh demo runs and declared fixed in
+production — but spike scores live in PERSISTED trend_results; production
+graphs kept serving old-math badges until a trend re-run. Process rules:
+changes to the meaning of persisted run outputs must be verified against
+the stale-data path, and ship notes must state re-run requirements; bible
+edits must use verified-match tooling (this amendment chain itself broke
+twice via unchecked replaces — (j) and (k) silently failed to insert, and
+PR #37 carrying (i) sat unmerged). Systemic fix: TREND_MATH_VERSION
+persisted in trend-run stats (v2 = the spike gate; pre-versioning runs
+read as v1); topics/trends/artifact reads warn through the existing
+warnings channel when persisted trend data predates current math, naming
+the recompute endpoint. Also fixed the second chart artifact from the same
+screenshots: partial FIRST buckets (data starting mid-bucket) render
+dashed/hollow like Phase 18's partial final buckets, with "(partial)" in
+the sparkline title.
+
+**2026-07-05 (j)** (Bek's UI review — Phase 21). Spike-score integrity:
+series-start buckets have no baseline (mean 0, floor 1) so their spike
+score equaled the raw count — every topic's badge showed its first week of
+data. Decision: gate spike scores on SERIES POSITION (first 3 buckets
+score 0.0), NOT on baseline emptiness — late-emerging topics have a
+baseline of zeros and their first-burst spikes are meaningful (the planted
+December spike, 69.0, depends on that and survived as the regression
+gate). Also: list-view polish (topic color dots, single-line truncation,
+nowrap columns, sentiment glyphs, "Noise" rows), provenance chips
+collapsed behind a disclosure, search placeholder, coherence row
+only-when-flagged, DATAGRAPH_INLINE_CPU_RUNS env toggle (default off).
+
+**2026-07-05 (i)** (Perelel repo-level feedback — labeling representation
+drift, CONFIRMED bug). Summary-backed clustering embeds
+record_summaries.rendered_text, but label runs load raw
+records.customer_text for representatives — clusters formed in one
+representation, labeled from another (symptom: generic labels on long raw
+threads). The receipts principle is NOT implicated: it governs what humans
+see; labeler input is model-facing and should match the space that formed
+the cluster. Phase 20 decisions: label loader follows cluster → embed →
+summarize lineage (textSource auto|raw|summary config, auto default;
+missing-summary fallback counted); label stats/report expose textSource;
+new label-run report endpoint reconstructs the exact representative blocks
+sent per cluster (recomputed from run params + stored representatives, not
+persisted); labeling.exampleTextLimit config (was hardcoded 700);
+labeling.promptAppend overlay (compose brand rules without forking the
+base prompt; in the prompt hash); duplicate/generic-label detection in the
+label report (not the warnings array); scripts/rerun_pipeline.py for
+refresh ergonomics with a printed vizUrl. Boundary held on the import-hook
+ask: extraction filtering stays agent-side, documented with the
+agentMessageCount=0 caveat (zero-agent-reply threads include UNANSWERED
+REAL COMPLAINTS — never drop on that signal alone).
+
 **2026-07-05 (h)** (Perelel round 1 — second-brand portability: PASSED).
 Fresh brand (women's health), fresh helpdesk (Gorgias, not Kustomer), fresh
 agent (Veras): 24 minutes export → first labeled graph, 0 upload rejects,
