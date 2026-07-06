@@ -669,7 +669,7 @@ function formatBucketLabel(value) {
   }).format(date);
 }
 
-export function trendBucketReadoutLabel(value, bucket, options = {}) {
+function trendBucketReadoutLabel(value, bucket, options = {}) {
   const date = parseDateOnly(value);
   if (!date) return String(value || "");
   if (bucket === "month") {
