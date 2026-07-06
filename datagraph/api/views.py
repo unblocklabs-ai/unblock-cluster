@@ -13,7 +13,7 @@ from datagraph.api.facets import (
 )
 from datagraph.api.records import include_normalized, list_records_for_graph
 from datagraph.api.runs import _to_response
-from datagraph.api.warnings import resolved_run_warnings
+from datagraph.api.warnings import resolved_run_warnings, trend_math_version_warnings
 from datagraph.core.config import (
     ConfigValidationError,
     apply_cluster_overrides,
@@ -418,6 +418,7 @@ async def get_trends(
             (run["id"],),
         )
         label_text = _latest_label_text_by_cluster(conn, cluster_run_id)
+        warnings = trend_math_version_warnings(run, graph_id, view_id)
     if summary_row is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="trend results missing")
     summary = json.loads(summary_row["summary_json"])
@@ -448,6 +449,7 @@ async def get_trends(
         "clusterRunId": cluster_run_id,
         "bucket": summary["bucket"],
         "window": summary["window"],
+        "warnings": warnings,
         "summary": summary,
         "series": series,
     }

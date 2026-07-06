@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
+from datagraph.core.trend_math import TREND_MATH_VERSION
 from datagraph.db import connect
 from datagraph.main import create_app
 from scripts.gen_synthetic import generate_records
@@ -146,7 +148,7 @@ def test_artifact_and_topics_warn_on_label_and_trend_mismatches(tmp_path: Path) 
         cluster_a = _run_view_action(client, graph_id, view_id, "cluster", {})
         _run_view_action(client, graph_id, view_id, "layout", {})
         _run_view_action(client, graph_id, view_id, "label", {})
-        _run_view_action(
+        trend_initial = _run_view_action(
             client,
             graph_id,
             view_id,
@@ -159,11 +161,37 @@ def test_artifact_and_topics_warn_on_label_and_trend_mismatches(tmp_path: Path) 
 
         healthy_artifact = client.get(f"/api/graphs/{graph_id}/views/{view_id}/artifact").json()
         healthy_topics = client.get(f"/api/graphs/{graph_id}/views/{view_id}/topics").json()
+        healthy_trends = client.get(f"/api/graphs/{graph_id}/views/{view_id}/trends").json()
         assert healthy_artifact["warnings"] == []
         assert healthy_topics["warnings"] == []
+        assert healthy_trends["warnings"] == []
         assert healthy_artifact["runRefs"]["clusterRunId"] == cluster_a["id"]
         assert any(topic["label"] is not None for topic in healthy_artifact["topics"])
         assert any(topic["trend"] is not None for topic in healthy_artifact["topics"])
+        assert trend_initial["stats"]["mathVersion"] == TREND_MATH_VERSION
+
+        _set_trend_math_version(client, trend_initial["id"], None)
+        stale_artifact = client.get(f"/api/graphs/{graph_id}/views/{view_id}/artifact").json()
+        stale_topics = client.get(f"/api/graphs/{graph_id}/views/{view_id}/topics").json()
+        stale_trends = client.get(f"/api/graphs/{graph_id}/views/{view_id}/trends").json()
+        stale_topic = client.get(
+            f"/api/graphs/{graph_id}/views/{view_id}/topics/"
+            f"{stale_topics['topics'][0]['clusterId']}"
+        ).json()
+        for payload in (stale_artifact, stale_topics, stale_topic, stale_trends):
+            assert _stale_trend_warning(payload["warnings"], trend_initial["id"])
+
+        _set_trend_math_version(client, trend_initial["id"], 1)
+        older_topics = client.get(f"/api/graphs/{graph_id}/views/{view_id}/topics").json()
+        assert _stale_trend_warning(older_topics["warnings"], trend_initial["id"])
+
+        _set_trend_math_version(client, trend_initial["id"], TREND_MATH_VERSION)
+        refreshed_artifact = client.get(f"/api/graphs/{graph_id}/views/{view_id}/artifact").json()
+        refreshed_topics = client.get(f"/api/graphs/{graph_id}/views/{view_id}/topics").json()
+        refreshed_trends = client.get(f"/api/graphs/{graph_id}/views/{view_id}/trends").json()
+        assert refreshed_artifact["warnings"] == []
+        assert refreshed_topics["warnings"] == []
+        assert refreshed_trends["warnings"] == []
 
         tuning_false = _run_view_action(
             client,
@@ -208,6 +236,34 @@ def test_artifact_and_topics_warn_on_label_and_trend_mismatches(tmp_path: Path) 
         assert warned_artifact["runRefs"]["clusterRunId"] == tuning_true["id"]
         assert all(topic["label"] is None for topic in warned_artifact["topics"])
         assert all(topic["trend"] is None for topic in warned_artifact["topics"])
+
+
+def _set_trend_math_version(
+    client: TestClient,
+    run_id: str,
+    version: int | None,
+) -> None:
+    with connect(client.app.state.settings.db_path) as conn:
+        row = conn.execute("SELECT stats_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+        stats = json.loads(row["stats_json"])
+        if version is None:
+            stats.pop("mathVersion", None)
+        else:
+            stats["mathVersion"] = version
+        conn.execute(
+            "UPDATE runs SET stats_json = ? WHERE id = ?",
+            (json.dumps(stats, sort_keys=True), run_id),
+        )
+        conn.commit()
+
+
+def _stale_trend_warning(warnings: list[str], run_id: str) -> bool:
+    return any(
+        f"trend run {run_id} was computed with older trend math" in warning
+        and f"v1 < v{TREND_MATH_VERSION}" in warning
+        and "/trends" in warning
+        for warning in warnings
+    )
 
 
 def _phase8_client(tmp_path: Path, records: list[dict[str, Any]]) -> TestClient:

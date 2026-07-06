@@ -74,6 +74,7 @@ def _artifact_context(conn: Any, graph_id: str, view_id: str) -> dict[str, Any]:
     # Trend snapshots are intentionally scoped to the matching default trend run;
     # that run id is already part of the ETag inputs.
     _, trend_run_id = _trend_snapshots(conn, graph_id, view_id, cluster_run_id, snapshots=False)
+    trend_math_version = _default_trend_math_version(conn, graph_id, view_id, trend_run_id)
     freshness = _artifact_record_freshness(conn, cluster_run_id, layout_run_id)
     return {
         "graph": graph,
@@ -84,6 +85,7 @@ def _artifact_context(conn: Any, graph_id: str, view_id: str) -> dict[str, Any]:
         "labelCount": label_freshness["labelCount"],
         "maxLabelCreatedAt": label_freshness["maxLabelCreatedAt"],
         "trendRunId": trend_run_id,
+        "trendMathVersion": trend_math_version,
         "recordCount": freshness["recordCount"],
         "maxUpdatedAt": freshness["maxUpdatedAt"],
     }
@@ -208,6 +210,7 @@ def _artifact_etag(context: dict[str, Any]) -> str:
             "layoutRunId": layout_run["id"],
             "labelRunId": context["labelRunId"],
             "trendRunId": context["trendRunId"],
+            "trendMathVersion": context["trendMathVersion"],
         },
         "recordCount": context["recordCount"],
         "maxUpdatedAt": context["maxUpdatedAt"],
@@ -216,6 +219,30 @@ def _artifact_etag(context: dict[str, Any]) -> str:
     }
     digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode("utf-8")).hexdigest()
     return f'"artifact-{digest}"'
+
+
+def _default_trend_math_version(
+    conn: Any,
+    graph_id: str,
+    view_id: str,
+    trend_run_id: str | None,
+) -> int | None:
+    if trend_run_id is None:
+        return None
+    row = fetch_one(
+        conn,
+        """
+        SELECT stats_json
+          FROM runs
+         WHERE id = ? AND graph_id = ? AND view_id = ?
+           AND type = 'trend' AND status = 'succeeded'
+        """,
+        (trend_run_id, graph_id, view_id),
+    )
+    if row is None:
+        return None
+    version = json.loads(row["stats_json"] or "{}").get("mathVersion")
+    return version if isinstance(version, int) else 1
 
 
 def _embedding_representation(conn: Any, embedding_run_id: str | None) -> dict[str, Any]:

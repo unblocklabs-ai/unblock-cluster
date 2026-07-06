@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from datagraph.core.ids import now_iso
-from datagraph.core.trend_math import compute_trends
+from datagraph.core.trend_math import TREND_MATH_VERSION, compute_trends
 from datagraph.db import connect, fetch_all, fetch_one
 
 ProgressCallback = Callable[[str, dict[str, Any]], None]
@@ -79,6 +79,7 @@ def execute_trend_run(
 
     return {
         "population": len(memberships),
+        "mathVersion": TREND_MATH_VERSION,
         "bucket": computation.bucket,
         "bucketCount": len(computation.buckets),
         "clusterCount": len({point.cluster_id for point in computation.points}),

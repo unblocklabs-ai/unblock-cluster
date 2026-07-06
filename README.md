@@ -588,6 +588,11 @@ Spike scores are gated for integrity: the first 3 buckets of the overall
 zero-filled series always carry `spikeScore: 0`, because they do not have enough
 history. Late-emerging topics still score their first burst after that point
 against the prior zero-filled baseline.
+
+Persisted trend runs are snapshots of the trend math at run time. After
+upgrading the service, re-run trends to recompute persisted scores; the UI
+warns when a default trend run predates the current math, and
+`scripts/rerun_pipeline.py` performs the rerun in one command.
 - `topic_evidence`: one topic with label object, source mix, representatives,
   and persisted trend series when present.
 - `topic_search`: embed a natural-language `question` once and rank topics by

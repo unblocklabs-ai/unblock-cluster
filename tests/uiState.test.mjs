@@ -24,6 +24,7 @@ import {
   topicPanelTopics,
   trendSparklinePartialPath,
   trendSparklinePath,
+  trendSparklineParts,
   trendSparklineTitle,
   updateFilters,
   updateTopicPanel,
@@ -184,6 +185,7 @@ test("builds sorted artifact view state with time extent and source filters", ()
   );
   assert.deepEqual(state.sourceTypes, ["review", "support"]);
   assert.deepEqual(state.timeExtent, { min: "2025-06-01", max: "2025-12-20" });
+  assert.equal(state.minRecordTimestamp, Date.parse("2025-06-01T00:00:00Z"));
   assert.equal(state.topicById.get(1).label, "December spike");
   assert.equal(state.recordById.get("r1").recordId, "rec-1");
 });
@@ -540,6 +542,62 @@ test("marks incomplete final buckets as a separate partial segment", () => {
   );
 });
 
+test("marks incomplete first buckets as a separate partial segment", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 2 },
+    { bucketStart: "2025-05-11", count: 10 },
+    { bucketStart: "2025-05-18", count: 4 },
+  ];
+  const options = {
+    width: 10,
+    height: 6,
+    padding: 1,
+    bucket: "week",
+    minRecordTimestamp: "2025-05-06T12:00:00Z",
+  };
+
+  assert.equal(trendSparklinePath(buckets, options), "M 5 1 L 9 4");
+  assert.equal(trendSparklinePartialPath(buckets, options), "M 1 5 L 5 1");
+  assert.deepEqual(trendSparklineParts(buckets, options).partialPoints, [{ x: 1, y: 5 }]);
+  assert.equal(
+    trendSparklinePartialPath(buckets, {
+      ...options,
+      minRecordTimestamp: "2025-05-04T00:00:00Z",
+    }),
+    "",
+  );
+});
+
+test("handles both incomplete first and final sparkline buckets", () => {
+  const buckets = [
+    { bucketStart: "2025-05-04", count: 2 },
+    { bucketStart: "2025-05-11", count: 10 },
+    { bucketStart: "2025-05-18", count: 4 },
+  ];
+  const options = {
+    width: 10,
+    height: 6,
+    padding: 1,
+    bucket: "week",
+    minRecordTimestamp: "2025-05-06T12:00:00Z",
+    maxRecordTimestamp: "2025-05-20T12:00:00Z",
+  };
+
+  assert.equal(trendSparklinePath(buckets, options), "M 5 1");
+  assert.equal(
+    trendSparklinePartialPath(buckets, options),
+    "M 1 5 L 5 1 M 5 1 L 9 4",
+  );
+  assert.deepEqual(trendSparklineParts(buckets, options).partialPoints, [
+    { x: 1, y: 5 },
+    { x: 9, y: 4 },
+  ]);
+  assert.equal(
+    trendSparklineTitle(buckets, options),
+    "(partial) May 4 – May 18 (partial) · peak 10 (May 11)",
+  );
+});
+
 test("builds sparkline title from the trimmed range", () => {
   assert.equal(
     trendSparklineTitle(
@@ -550,6 +608,20 @@ test("builds sparkline title from the trimmed range", () => {
       ],
     ),
     "May 11 – May 18 · peak 32 (May 11)",
+  );
+  assert.equal(
+    trendSparklineTitle(
+      [
+        { bucketStart: "2025-05-04", count: 0 },
+        { bucketStart: "2025-05-11", count: 32 },
+        { bucketStart: "2025-05-18", count: 8 },
+      ],
+      {
+        bucket: "week",
+        minRecordTimestamp: "2025-05-12T00:00:00Z",
+      },
+    ),
+    "(partial) May 11 – May 18 · peak 32 (May 11)",
   );
 });
 
