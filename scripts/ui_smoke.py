@@ -106,7 +106,7 @@ def scenario_form_hygiene(browser: Browser) -> None:
 
 def scenario_scrubber(browser: Browser) -> None:
     click_selector(browser, "#topicList [data-topic-id]")
-    wait_js(browser, "document.querySelector('[data-inspector-sparkline]')", "inspector sparkline")
+    wait_js(browser, "!!document.querySelector('[data-inspector-sparkline]')", "inspector sparkline")
     wait_js(
         browser,
         "document.querySelector('[data-sparkline-readout]')?.dataset.defaultReadout",
@@ -163,14 +163,18 @@ def scenario_date_window(browser: Browser) -> None:
         raise SmokeFailure(f"missing initial trend state: {before}")
     browser.shot(OUT / "05-date-all-before.png")
 
-    click_selector(browser, '[data-date-preset="30d"]')
-    wait_for(browser, lambda: trend_state(browser)["path"] != before["path"], "30d path change")
-    after_30d = trend_state(browser)
-    if after_30d["caption"] == before["caption"]:
-        raise SmokeFailure("30d preset did not change inspector caption")
-    if after_30d["card"] == before["card"]:
-        raise SmokeFailure("30d preset did not re-render card sparklines")
-    browser.shot(OUT / "06-date-30d.png")
+    # Windowing keeps any bucket that intersects the range, so a preset only
+    # changes the drawing when it actually excludes buckets. The demo's first
+    # topic spans ~5 weekly buckets; 7d is guaranteed to cut it, wider presets
+    # may legitimately be a no-op for that topic.
+    click_selector(browser, '[data-date-preset="7d"]')
+    wait_for(browser, lambda: trend_state(browser)["path"] != before["path"], "7d path change")
+    after_7d = trend_state(browser)
+    if after_7d["caption"] == before["caption"]:
+        raise SmokeFailure("7d preset did not change inspector caption")
+    if after_7d["card"] == before["card"]:
+        raise SmokeFailure("7d preset did not re-render card sparklines")
+    browser.shot(OUT / "06-date-7d.png")
 
     click_selector(browser, '[data-date-preset="all"]')
     wait_for(browser, lambda: trend_state(browser)["path"] == before["path"], "All path restoration")
