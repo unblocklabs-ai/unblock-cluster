@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -11,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from datagraph.core.embedding_text import render_embedding_text
 from datagraph.core.time import parse_timestamp
-from datagraph.core.trend_math import bucket_start, compute_trends
+from datagraph.core.trend_math import MIN_BASELINE_BUCKETS, bucket_start, compute_trends
 from datagraph.db import connect
 from datagraph.main import create_app
 from scripts.gen_synthetic import generate_records
@@ -38,10 +39,92 @@ def test_trend_math_buckets_zero_fill_baselines_and_scores() -> None:
     assert [round(point.share, 6) for point in cluster_one] == [0.5, 1.0, 0.333333]
     assert cluster_one[-1].baseline_mean == 1
     assert cluster_one[-1].baseline_std == 0
-    assert cluster_one[-1].spike_score == 4
+    assert cluster_one[-1].spike_score == 0.0
     assert result.summary["newTopics"] == [
         {"clusterId": 2, "firstBucket": "2025-01-13", "count": 5}
     ]
+
+
+def test_trend_math_gates_initial_spikes_by_series_position_only() -> None:
+    counts = {
+        1: {
+            "2025-01-01": 50,
+            "2025-01-08": 60,
+            "2025-01-15": 70,
+            "2025-01-22": 90,
+        },
+        -1: {"2025-01-01": 1, "2025-01-08": 1, "2025-01-15": 1, "2025-01-22": 1},
+    }
+    result = compute_trends(_trend_rows(counts), bucket="week")
+    cluster_one = [point for point in result.points if point.cluster_id == 1]
+
+    assert MIN_BASELINE_BUCKETS == 3
+    assert [point.count for point in cluster_one] == [50, 60, 70, 90]
+    assert [point.spike_score for point in cluster_one[:MIN_BASELINE_BUCKETS]] == [
+        0.0,
+        0.0,
+        0.0,
+    ]
+    assert cluster_one[2].baseline_mean == 55
+    assert math.isclose(
+        cluster_one[3].spike_score,
+        (90 - 60) / max(math.sqrt(200 / 3), math.sqrt(60), 1.0),
+    )
+
+
+def test_trend_math_preserves_late_emerging_topic_spike_after_zero_baseline() -> None:
+    anchor = {
+        "2025-01-01": 1,
+        "2025-01-08": 1,
+        "2025-01-15": 1,
+        "2025-01-22": 1,
+        "2025-01-29": 1,
+        "2025-02-05": 1,
+    }
+    result = compute_trends(
+        _trend_rows(
+            {
+                1: {"2025-02-05": 69},
+                2: anchor,
+            }
+        ),
+        bucket="week",
+    )
+    cluster_one = [point for point in result.points if point.cluster_id == 1]
+    burst = cluster_one[-1]
+
+    assert cluster_one.index(burst) >= MIN_BASELINE_BUCKETS
+    assert all(point.count == 0 for point in cluster_one[:-1])
+    assert burst.baseline_mean == 0.0
+    assert burst.baseline_std == 0.0
+    assert burst.spike_score == 69.0
+    assert result.summary["surprisingTopics"][0] == {
+        "clusterId": 1,
+        "spikeScore": 69.0,
+        "topBucket": "2025-02-03",
+        "count": 69,
+    }
+
+
+def test_trend_math_surprising_topics_ignore_first_series_buckets() -> None:
+    result = compute_trends(
+        _trend_rows(
+            {
+                1: {"2025-01-01": 48},
+                2: {
+                    "2025-01-01": 1,
+                    "2025-01-08": 1,
+                    "2025-01-15": 1,
+                    "2025-01-22": 1,
+                },
+            }
+        ),
+        bucket="week",
+    )
+
+    assert all(
+        row["clusterId"] != 1 for row in result.summary["surprisingTopics"]
+    )
 
 
 def test_trend_math_spike_floors_and_window_sections() -> None:
@@ -69,8 +152,8 @@ def test_trend_math_spike_floors_and_window_sections() -> None:
         window_end="2025-01-20",
     )
     by_cluster_bucket = {(point.cluster_id, point.bucket_start): point for point in result.points}
-    assert by_cluster_bucket[(1, "2025-01-13")].spike_score == 2
-    assert by_cluster_bucket[(2, "2025-01-13")].spike_score == 2
+    assert by_cluster_bucket[(1, "2025-01-13")].spike_score == 0.0
+    assert by_cluster_bucket[(2, "2025-01-13")].spike_score == 0.0
     vanishing_ids = {row["clusterId"] for row in result.summary["vanishingTopics"]}
     assert 3 in vanishing_ids
     assert 4 not in vanishing_ids
@@ -180,6 +263,28 @@ def test_trend_api_validation_snapshots_integrity_and_determinism(tmp_path: Path
             f"/api/graphs/{graph_id}/views/{view_id}/topics/{trended_topic['clusterId']}"
         ).json()
         assert detail["topic"]["trend"] == trended_topic["trend"]
+
+        with connect(client.app.state.settings.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE trend_results
+                   SET spike_score = 0
+                 WHERE run_id = ? AND cluster_id = ?
+                """,
+                (second_run["id"], trended_topic["clusterId"]),
+            )
+            conn.commit()
+        zeroed_topics = client.get(f"/api/graphs/{graph_id}/views/{view_id}/topics").json()
+        zeroed_topic = next(
+            topic
+            for topic in zeroed_topics["topics"]
+            if topic["clusterId"] == trended_topic["clusterId"]
+        )
+        assert zeroed_topic["trend"] == {
+            "bucket": "week",
+            "spikeScore": 0.0,
+            "topBucket": None,
+        }
 
 
 @pytest.mark.slow

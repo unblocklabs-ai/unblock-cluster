@@ -87,6 +87,7 @@ def main() -> int:
     parser.add_argument("--size", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--inline-cpu-runs", action="store_true")
     args = parser.parse_args()
 
     if args.data_dir.exists():
@@ -104,7 +105,11 @@ def main() -> int:
     }
     embedding_provider = StructuredTopicProvider(text_to_topic)
     label_provider = ScriptedLabelProvider()
-    settings = Settings(data_dir=args.data_dir, port=args.port)
+    settings = Settings(
+        data_dir=args.data_dir,
+        port=args.port,
+        inline_cpu_runs=args.inline_cpu_runs,
+    )
     with TestClient(
         create_app(
             settings,
@@ -149,6 +154,9 @@ def main() -> int:
         )
         artifact = client.get(f"/api/graphs/{graph_id}/views/{view_id}/artifact").json()
 
+    serve_env = f"DATAGRAPH_DATA_DIR={args.data_dir} DATAGRAPH_PORT={args.port} "
+    if args.inline_cpu_runs:
+        serve_env += "DATAGRAPH_INLINE_CPU_RUNS=1 "
     viz_url = f"http://127.0.0.1:{args.port}/?graphId={graph_id}&viewId={view_id}"
     print(
         json.dumps(
@@ -160,10 +168,7 @@ def main() -> int:
                 "artifactUrl": f"http://127.0.0.1:{args.port}/api/graphs/{graph_id}/views/{view_id}/artifact",
                 "topics": len(artifact["topics"]),
                 "records": len(artifact["data"]),
-                "serveCommand": (
-                    f"DATAGRAPH_DATA_DIR={args.data_dir} "
-                    ".venv/bin/python -m datagraph.main"
-                ),
+                "serveCommand": f"{serve_env}.venv/bin/python -m datagraph.main",
             },
             indent=2,
             sort_keys=True,

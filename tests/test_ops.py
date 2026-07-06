@@ -147,7 +147,12 @@ def test_delete_run_requires_terminal_and_not_view_default(tmp_path: Path) -> No
 
 @pytest.mark.slow
 def test_scale_benchmark_smoke_path(tmp_path: Path) -> None:
-    metrics = run_benchmark(data_dir=tmp_path / "bench", size=500, port=0)
+    metrics = run_benchmark(
+        data_dir=tmp_path / "bench",
+        size=500,
+        port=0,
+        inline_cpu_runs=True,
+    )
 
     assert metrics["recordCount"] == 500
     assert metrics["embeddingDimensions"] == 1536

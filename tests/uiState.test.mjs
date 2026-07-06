@@ -7,6 +7,8 @@ import {
   buildViewState,
   clearTopicSelection,
   datePresetFilters,
+  listRecordTitleCell,
+  listTopicCell,
   listWindow,
   noiseRecords,
   parseViewParams,
@@ -17,6 +19,7 @@ import {
   selectTopic,
   selectedTopicExtentRecords,
   showMoreListRecords,
+  sentimentCell,
   spikeBadge,
   topicPanelTopics,
   trendSparklinePartialPath,
@@ -388,6 +391,47 @@ test("resolves representatives and trend spike badge", () => {
     score: 6.5,
   });
   assert.equal(spikeBadge(state.topicById.get(2)), null);
+  assert.equal(spikeBadge({ trend: { spikeScore: 0, topBucket: null } }), null);
+  assert.equal(spikeBadge({ trend: { spikeScore: -1, topBucket: "2025-01-01" } }), null);
+});
+
+test("renders list topic cells with dots, noise labels, and truncation classes", () => {
+  const state = buildViewState(noiseArtifact);
+  const topicCell = listTopicCell(noiseArtifact.data[0], state.topicById.get(1));
+  assert.match(topicCell, /class="topic-cell-content"/);
+  assert.match(topicCell, /class="topic-swatch list-topic-swatch"/);
+  assert.match(topicCell, /class="topic-cell-label"/);
+  assert.match(topicCell, />December spike</);
+
+  const noiseCell = listTopicCell(noiseArtifact.data.find((record) => record.id === "n1"), null);
+  assert.match(noiseCell, />Noise</);
+  assert.match(noiseCell, /noise-swatch/);
+  assert.doesNotMatch(noiseCell, /Topic unknown/);
+
+  const titleCell = listRecordTitleCell({ title: "A long title", recordId: "rec-1" });
+  assert.match(titleCell, /class="single-line"/);
+  assert.match(titleCell, /title="A long title"/);
+});
+
+test("renders compact sentiment icons and passthrough fallbacks", () => {
+  assert.equal(
+    sentimentCell("positive"),
+    '<span class="sentiment-icon sentiment-positive" title="positive" aria-label="positive">●</span>',
+  );
+  assert.equal(
+    sentimentCell("neutral"),
+    '<span class="sentiment-icon sentiment-neutral" title="neutral" aria-label="neutral">●</span>',
+  );
+  assert.equal(
+    sentimentCell("negative"),
+    '<span class="sentiment-icon sentiment-negative" title="negative" aria-label="negative">●</span>',
+  );
+  assert.equal(
+    sentimentCell("mixed"),
+    '<span class="sentiment-text" title="mixed">mixed</span>',
+  );
+  assert.equal(sentimentCell(""), "");
+  assert.equal(sentimentCell(null), "");
 });
 
 test("builds sparkline paths for empty, single, flat, and spike series", () => {

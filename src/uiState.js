@@ -268,13 +268,47 @@ export function clusterColor(clusterId) {
   return palette[Math.abs(Number(clusterId)) % palette.length];
 }
 
-export function spikeBadge(topic, threshold = 3) {
-  if (!topic?.trend || topic.trend.spikeScore < threshold) return null;
+export function spikeBadge(topic, threshold = 0) {
+  if (!topic?.trend || topic.trend.spikeScore <= threshold || !topic.trend.topBucket) {
+    return null;
+  }
   return {
     text: `Spike ${topic.trend.spikeScore.toFixed(1)} in ${topic.trend.topBucket}`,
     bucket: topic.trend.topBucket,
     score: topic.trend.spikeScore,
   };
+}
+
+export function listTopicCell(record, topic) {
+  const noise = record?.isNoise || record?.clusterId === NOISE_TOPIC_ID || !topic;
+  const label = noise ? "Noise" : topicLabel(topic);
+  const color = noise ? "#8b949e" : clusterColor(record.clusterId);
+  return `
+    <span class="topic-cell-content" title="${escapeAttr(label)}">
+      <span class="topic-swatch list-topic-swatch${noise ? " noise-swatch" : ""}" style="background:${escapeAttr(color)}"></span>
+      <span class="topic-cell-label">${escapeHtml(label)}</span>
+    </span>
+  `;
+}
+
+export function listRecordTitleCell(record) {
+  const title = record?.title || record?.recordId || "";
+  return `<span class="single-line" title="${escapeAttr(title)}">${escapeHtml(title)}</span>`;
+}
+
+export function sentimentCell(sentiment) {
+  const value = String(sentiment ?? "").trim();
+  if (!value) return "";
+  const normalized = value.toLowerCase();
+  const known = {
+    positive: { glyph: "●", className: "positive" },
+    neutral: { glyph: "●", className: "neutral" },
+    negative: { glyph: "●", className: "negative" },
+  }[normalized];
+  if (!known) {
+    return `<span class="sentiment-text" title="${escapeAttr(value)}">${escapeHtml(value)}</span>`;
+  }
+  return `<span class="sentiment-icon sentiment-${known.className}" title="${escapeAttr(value)}" aria-label="${escapeAttr(value)}">${known.glyph}</span>`;
 }
 
 export function trendSparklinePath(buckets = [], options = {}) {
@@ -385,6 +419,18 @@ function normalizeTopicSort(value) {
 
 function normalizeSearch(value) {
   return String(value ?? "").trim();
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll("'", "&#039;");
 }
 
 function prepareSparkline(buckets = [], options = {}) {

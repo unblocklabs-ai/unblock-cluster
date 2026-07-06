@@ -1016,12 +1016,12 @@ def _trend_snapshots_by_cluster(
     rows = fetch_all(
         conn,
         """
-        SELECT cluster_id, bucket_start, spike_score
+        SELECT cluster_id, bucket_start, count, spike_score
           FROM trend_results
          WHERE run_id = ?
            AND bucket_start >= ?
            AND bucket_start <= ?
-         ORDER BY cluster_id ASC, spike_score DESC, bucket_start ASC
+         ORDER BY cluster_id ASC, spike_score DESC, count DESC, bucket_start ASC
         """,
         (trend_run["id"], window["start"], window["end"]),
     )
@@ -1030,10 +1030,11 @@ def _trend_snapshots_by_cluster(
         cluster_id = int(row["cluster_id"])
         if cluster_id in snapshots:
             continue
+        spike_score = row["spike_score"] if row["spike_score"] > 0 else 0.0
         snapshots[cluster_id] = {
             "bucket": summary["bucket"],
-            "spikeScore": row["spike_score"],
-            "topBucket": row["bucket_start"],
+            "spikeScore": spike_score,
+            "topBucket": row["bucket_start"] if spike_score > 0 else None,
         }
     return snapshots
 
