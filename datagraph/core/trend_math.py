@@ -8,6 +8,11 @@ from typing import Literal
 
 Bucket = Literal["day", "week", "month"]
 
+# Initial buckets have too little prior series history for a meaningful spike score.
+# The gate is by zero-based series position, not by baseline contents, so topics
+# that emerge after this point still score against their prior zero-filled baseline.
+MIN_BASELINE_BUCKETS = 3
+
 
 @dataclass(frozen=True)
 class TrendPoint:
@@ -77,12 +82,13 @@ def compute_trends(
     by_cluster: dict[int, list[TrendPoint]] = defaultdict(list)
     for cluster_id in clusters:
         prior_counts: list[int] = []
-        for current_bucket in buckets:
+        for bucket_index, current_bucket in enumerate(buckets):
             count = counts[cluster_id][current_bucket]
             baseline = prior_counts[-8:]
             mean = sum(baseline) / len(baseline) if baseline else 0.0
             std = _population_std(baseline, mean) if baseline else 0.0
             denominator = max(std, math.sqrt(mean), 1.0)
+            raw_spike_score = (count - mean) / denominator
             point = TrendPoint(
                 cluster_id=cluster_id,
                 bucket_start=current_bucket,
@@ -91,7 +97,7 @@ def compute_trends(
                 share=count / totals[current_bucket] if totals[current_bucket] else 0.0,
                 baseline_mean=mean,
                 baseline_std=std,
-                spike_score=(count - mean) / denominator,
+                spike_score=raw_spike_score if bucket_index >= MIN_BASELINE_BUCKETS else 0.0,
             )
             points.append(point)
             by_cluster[cluster_id].append(point)

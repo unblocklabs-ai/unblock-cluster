@@ -82,6 +82,7 @@ def run_benchmark(
     seed: int | None = 42,
     port: int = 8080,
     dimensions: int = 1536,
+    inline_cpu_runs: bool = False,
 ) -> dict[str, Any]:
     if data_dir.exists():
         shutil.rmtree(data_dir)
@@ -106,7 +107,7 @@ def run_benchmark(
 
     with TestClient(
         create_app(
-            Settings(data_dir=data_dir, port=port),
+            Settings(data_dir=data_dir, port=port, inline_cpu_runs=inline_cpu_runs),
             embedding_provider_factory=lambda _config: embedding_provider,
             label_provider_factory=lambda _config: label_provider,
         )

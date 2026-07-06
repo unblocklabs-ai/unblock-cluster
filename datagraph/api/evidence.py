@@ -517,13 +517,14 @@ def _topic_persisted_trend(
     if not rows:
         return None
     top = max(rows, key=lambda row: (row["spike_score"], row["count"], row["bucket_start"]))
+    spike_score = top["spike_score"] if top["spike_score"] > 0 else 0.0
     return {
         "trendRunId": trend_run["id"],
         "bucket": summary["bucket"],
         "snapshot": {
             "bucket": summary["bucket"],
-            "spikeScore": top["spike_score"],
-            "topBucket": top["bucket_start"],
+            "spikeScore": spike_score,
+            "topBucket": top["bucket_start"] if spike_score > 0 else None,
         },
         "series": [
             {

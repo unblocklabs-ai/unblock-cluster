@@ -31,7 +31,17 @@ def load_settings() -> Settings:
     port = int(os.environ.get("DATAGRAPH_PORT") or os.environ.get("DATA_GRAPH_PORT") or "8080")
     api_key = os.environ.get("OPENAI_API_KEY") or None
     read_only = _env_bool(os.environ.get("DATAGRAPH_READ_ONLY"))
-    return Settings(data_dir=data_dir, port=port, openai_api_key=api_key, read_only=read_only)
+    inline_cpu_runs = _env_bool(
+        os.environ.get("DATAGRAPH_INLINE_CPU_RUNS")
+        or os.environ.get("DATA_GRAPH_INLINE_CPU_RUNS")
+    )
+    return Settings(
+        data_dir=data_dir,
+        port=port,
+        openai_api_key=api_key,
+        read_only=read_only,
+        inline_cpu_runs=inline_cpu_runs,
+    )
 
 
 def _env_bool(value: str | None) -> bool:

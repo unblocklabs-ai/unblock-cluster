@@ -15,6 +15,8 @@ import {
   buildViewState,
   clearTopicSelection,
   clusterColor,
+  listRecordTitleCell,
+  listTopicCell,
   listWindow,
   NOISE_TOPIC_ID,
   noiseRecords,
@@ -25,6 +27,7 @@ import {
   selectTopic,
   selectedTopicExtentRecords,
   showMoreListRecords,
+  sentimentCell,
   spikeBadge,
   topicPanelTopics,
   topicLabel,
@@ -454,7 +457,7 @@ function renderInspector(state, records) {
     ${renderSparkline(series, "large")}
     ${selectedTopic.summary ? `<p class="wrap-text">${escapeHtml(selectedTopic.summary)}</p>` : ""}
     <dl>
-      <dt>Coherence</dt><dd>${selectedTopic.coherent === false ? "Low" : "Normal"}</dd>
+      ${selectedTopic.coherent === false ? `<dt>Coherence</dt><dd>Low</dd>` : ""}
       <dt>Visible records</dt><dd>${formatCount(selectedRecords.length)}</dd>
       <dt>Total records</dt><dd>${formatCount(selectedTopic.size)}</dd>
       <dt>Source mix</dt><dd>${formatSourceMix(selectedTopic.sourceMix)}</dd>
@@ -604,7 +607,14 @@ function renderList(state, records) {
           : ""
       }
     </div>
-    <table>
+    <table class="record-table">
+      <colgroup>
+        <col class="topic-col" />
+        <col class="record-col" />
+        <col class="source-col" />
+        <col class="sentiment-col" />
+        <col class="text-col" />
+      </colgroup>
       <thead><tr><th>Topic</th><th>Record</th><th>Source</th><th>Sentiment</th><th>Text</th></tr></thead>
       <tbody>
         ${windowed.records
@@ -616,11 +626,11 @@ function renderList(state, records) {
               record.clusterId === state.selectedTopicId;
             return `
               <tr class="${record.id === state.selectedRecordId ? "selected" : ""} ${topicSelected ? "topic-selected" : ""}" data-record-id="${escapeAttr(record.id)}" tabindex="0">
-                <td>${escapeHtml(record.isNoise ? "Noise" : topicLabel(topic))}</td>
-                <td>${escapeHtml(record.title || record.recordId)}</td>
-                <td>${escapeHtml(record.sourceType || "")}</td>
-                <td>${escapeHtml(record.sentiment || "")}</td>
-                <td class="text-cell"><span>${escapeHtml(record.customerText || "")}</span></td>
+                <td class="topic-cell">${listTopicCell(record, topic)}</td>
+                <td class="record-title-cell">${listRecordTitleCell(record)}</td>
+                <td class="source-cell"><span class="single-line" title="${escapeAttr(record.sourceType || "")}">${escapeHtml(record.sourceType || "")}</span></td>
+                <td class="sentiment-cell">${sentimentCell(record.sentiment)}</td>
+                <td class="text-cell"><span class="single-line" title="${escapeAttr(record.customerText || "")}">${escapeHtml(record.customerText || "")}</span></td>
               </tr>
             `;
           })
@@ -896,13 +906,17 @@ function renderProvenance(state) {
     ["trend", refs.trendRunId],
   ].filter(([, value]) => value);
   els.provenance.innerHTML = `
-    <span>Runs</span>
-    ${items.map(([label, value]) => renderRunChip(label, value)).join("")}
-    ${
-      state.artifact.representation === "summary"
-        ? `<span class="representation-pill">summary representation</span>${refs.summarizeRunId ? renderRunChip("summary", refs.summarizeRunId) : ""}`
-        : `<span class="representation-pill">raw representation</span>`
-    }
+    <details class="run-details">
+      <summary>Run details</summary>
+      <div class="run-details-body">
+        ${items.map(([label, value]) => renderRunChip(label, value)).join("")}
+        ${
+          state.artifact.representation === "summary"
+            ? `<span class="representation-pill">summary representation</span>${refs.summarizeRunId ? renderRunChip("summary", refs.summarizeRunId) : ""}`
+            : `<span class="representation-pill">raw representation</span>`
+        }
+      </div>
+    </details>
   `;
   els.provenance.querySelectorAll("[data-copy-run-id]").forEach((button) => {
     button.addEventListener("click", () => copyRunId(button));

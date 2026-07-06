@@ -583,6 +583,11 @@ Baseline-dependent sections (`vanishing_topics`, `rising_topics`, and trend
 summaries generally) compare the window against the 8 buckets before it, so
 they are empty when the window starts at the beginning of the data's time
 span — narrow the window to enable them.
+
+Spike scores are gated for integrity: the first 3 buckets of the overall
+zero-filled series always carry `spikeScore: 0`, because they do not have enough
+history. Late-emerging topics still score their first burst after that point
+against the prior zero-filled baseline.
 - `topic_evidence`: one topic with label object, source mix, representatives,
   and persisted trend series when present.
 - `topic_search`: embed a natural-language `question` once and rank topics by

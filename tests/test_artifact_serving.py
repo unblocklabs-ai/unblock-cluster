@@ -138,6 +138,32 @@ def test_artifact_gzip_etag_cache_float_precision_and_records_slimming(
         assert relabeled_topic["label"] == "Phase 10 non-default relabel"
         assert client.app.state.artifact_compositions == 2
 
+        with connect(client.app.state.settings.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE trend_results
+                   SET spike_score = 0
+                 WHERE run_id = ? AND cluster_id = ?
+                """,
+                (trend_run_id, replacement_cluster_id),
+            )
+            conn.commit()
+        client.app.state.artifact_cache.clear()
+        zeroed = _raw_asgi_get(client, path, headers={"accept-encoding": "gzip"})
+        assert zeroed["status"] == 200
+        zeroed_artifact = json.loads(gzip.decompress(zeroed["body"]))
+        zeroed_topic = next(
+            topic
+            for topic in zeroed_artifact["topics"]
+            if topic["clusterId"] == replacement_cluster_id
+        )
+        assert zeroed_topic["trend"] == {
+            "bucket": "week",
+            "spikeScore": 0.0,
+            "topBucket": None,
+        }
+        assert client.app.state.artifact_compositions == 3
+
 
 def test_static_cache_control_headers(tmp_path: Path) -> None:
     repo_index = Path(__file__).resolve().parents[1] / "dist" / "index.html"
