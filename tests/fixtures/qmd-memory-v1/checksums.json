@@ -2,12 +2,16 @@
   "algorithm": "sha256",
   "files": {
     "chunks.ndjson": {
-      "bytes": 5361,
-      "sha256": "cb94e4c0ef01be12d0571c3ab91483282da7e34fb67f3fa103b3456438f02e8d"
+      "bytes": 6274,
+      "sha256": "99de6515a406ba283c35f4c5057020a5ad9fb35880a8355419fdc3098d61b928"
     },
     "manifest.json": {
-      "bytes": 1171,
-      "sha256": "6f31d6a286e252dfe1b3a4506c7ba32a8186911303ef5f2c92900900accc5638"
+      "bytes": 1364,
+      "sha256": "0b4afaedb522ceef4d753100b093418a8a4aec3cb1c86ba1de63fabb4facb591"
+    },
+    "vectors.ndjson": {
+      "bytes": 2672,
+      "sha256": "ceac952a7710c357cd04482cd1ae1373fd85232cb8d16fbecd306f3000b6ccd4"
     },
     "vectors.f32": {
       "bytes": 128,

@@ -42,6 +42,8 @@ is the first supported adapter:
 
 The command creates or updates the dataset graph and prints its succeeded external
 embedding run and `vizUrl`. It does not require QMD, network access, or an embedding API.
+Distinct collection/path records may share one content-addressed QMD vector without
+losing either source's provenance or duplicating the binary payload.
 See [the QMD Memory Bundle v1 contract](docs/qmd-memory-bundle-v1.md) for payload fields,
 checksums, provenance, snapshot/versioning semantics, and the upstream exporter contract.
 

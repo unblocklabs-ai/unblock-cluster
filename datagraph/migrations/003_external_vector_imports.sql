@@ -52,6 +52,7 @@ CREATE TABLE external_chunk_versions (
   record_id TEXT NOT NULL UNIQUE REFERENCES records(id) ON DELETE CASCADE,
   introduced_import_id TEXT NOT NULL REFERENCES external_imports(id) ON DELETE CASCADE,
   embedding_space_id TEXT NOT NULL REFERENCES embedding_spaces(id) ON DELETE RESTRICT,
+  vector_id TEXT NOT NULL,
   vector_sha256 TEXT NOT NULL,
   text_sha256 TEXT NOT NULL,
   document_hash TEXT NOT NULL,
@@ -88,12 +89,13 @@ CREATE TABLE external_import_items (
 
 CREATE TABLE external_vectors (
   embedding_space_id TEXT NOT NULL REFERENCES embedding_spaces(id) ON DELETE CASCADE,
+  vector_id TEXT NOT NULL,
   vector_sha256 TEXT NOT NULL,
   original_vector BLOB NOT NULL,
   derived_vector BLOB NOT NULL,
   transformation TEXT NOT NULL CHECK(transformation IN ('none', 'l2-normalize')),
   created_at TEXT NOT NULL,
-  PRIMARY KEY(embedding_space_id, vector_sha256)
+  PRIMARY KEY(embedding_space_id, vector_id)
 );
 
 CREATE INDEX idx_external_datasets_graph ON external_datasets(graph_id);

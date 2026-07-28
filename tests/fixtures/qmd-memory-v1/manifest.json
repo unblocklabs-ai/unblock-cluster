@@ -1,20 +1,24 @@
 {
   "checksums": {
     "chunks.ndjson": {
-      "bytes": 5361,
-      "sha256": "cb94e4c0ef01be12d0571c3ab91483282da7e34fb67f3fa103b3456438f02e8d"
+      "bytes": 6274,
+      "sha256": "99de6515a406ba283c35f4c5057020a5ad9fb35880a8355419fdc3098d61b928"
+    },
+    "vectors.ndjson": {
+      "bytes": 2672,
+      "sha256": "ceac952a7710c357cd04482cd1ae1373fd85232cb8d16fbecd306f3000b6ccd4"
     },
     "vectors.f32": {
       "bytes": 128,
       "sha256": "32d8cb84d449b54ed44b5a290521c85a5075027c20ad13e5dfaac0e4f6379a2b"
     }
   },
-  "chunkCount": 8,
+  "chunkCount": 10,
   "chunking": {
     "exporterOwned": true,
     "strategy": "synthetic-fixed-fixture"
   },
-  "documentCount": 4,
+  "documentCount": 5,
   "embedding": {
     "dimensions": 4,
     "distanceMetric": "cosine",
@@ -32,6 +36,7 @@
   "payloads": {
     "checksums": "checksums.json",
     "chunks": "chunks.ndjson",
+    "vectorIndex": "vectors.ndjson",
     "vectors": "vectors.f32"
   },
   "schema": {
@@ -45,5 +50,6 @@
   "sourceIdentity": {
     "id": "qmd-fixture-source",
     "label": "Synthetic QMD fixture"
-  }
+  },
+  "vectorCount": 8
 }

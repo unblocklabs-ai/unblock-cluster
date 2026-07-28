@@ -629,6 +629,7 @@ function renderExternalProvenance(provenance) {
         <dt>Document hash</dt><dd>${escapeHtml(provenance.documentHash || "")}</dd>
         <dt>Chunk</dt><dd>${escapeHtml(`${provenance.chunkSequence ?? ""} of ${provenance.totalChunks ?? ""}`)}</dd>
         <dt>Character range</dt><dd>${escapeHtml(`${provenance.characterStart ?? ""}–${provenance.characterEnd ?? "unknown"}`)}</dd>
+        <dt>Vector ID</dt><dd>${escapeHtml(embedding.vectorId || "")}</dd>
         <dt>Embedding</dt><dd>${escapeHtml(joinParts([embedding.model, embedding.fingerprint]))}</dd>
         <dt>Dimensions</dt><dd>${escapeHtml(formatOptionalNumber(embedding.dimensions))}</dd>
         <dt>Export ID</dt><dd>${escapeHtml(bundle.exportId || "")}</dd>

@@ -79,6 +79,7 @@ def external_provenance_by_record(
                     "distanceMetric": row["distance_metric"],
                     "normalization": row["normalization"],
                     "spaceId": row["embedding_space_id"],
+                    "vectorId": row["vector_id"],
                     "vectorSha256": row["vector_sha256"],
                 },
                 "bundle": {

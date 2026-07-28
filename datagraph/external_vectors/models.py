@@ -35,6 +35,7 @@ class ExternalBundleManifest:
     exporter_version: str
     source_identity: dict[str, Any]
     chunk_count: int
+    vector_count: int
     document_count: int
     embedding_space: ExternalEmbeddingSpace
     chunking: dict[str, Any] | None
@@ -47,6 +48,7 @@ class ExternalBundleManifest:
 @dataclass(frozen=True)
 class ExternalChunk:
     external_id: str
+    vector_id: str
     document_hash: str
     sequence: int
     text: str
@@ -60,7 +62,6 @@ class ExternalChunk:
     document_modified_at: str
     active: bool
     embedded_at: str
-    vector_offset: int
     vector_bytes: bytes
     metadata: dict[str, Any]
 

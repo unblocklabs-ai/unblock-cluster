@@ -73,6 +73,14 @@ def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
             row["name"] for row in conn.execute("PRAGMA table_info(records)")
         }
         assert "is_active" in record_columns
+        chunk_version_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(external_chunk_versions)")
+        }
+        vector_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(external_vectors)")
+        }
+        assert "vector_id" in chunk_version_columns
+        assert "vector_id" in vector_columns
 
 
 def test_external_vector_migration_upgrades_existing_v2_records_as_active(tmp_path: Path) -> None:

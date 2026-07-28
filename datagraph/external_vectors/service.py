@@ -244,8 +244,7 @@ def _persist_bundle(
             )
             if chunk.active:
                 active_count += 1
-                vector_sha = hashlib.sha256(chunk.vector_bytes).hexdigest()
-                vector_key = _vector_key(space_id, vector_sha)
+                vector_key = _vector_key(space_id, chunk.vector_id)
                 conn.execute(
                     """
                     INSERT INTO embedding_items (run_id, record_id, text_hash, status)
@@ -294,6 +293,7 @@ def _persist_bundle(
             "exportId": manifest.export_id,
             "records": active_count,
             "chunks": manifest.chunk_count,
+            "vectors": manifest.vector_count,
             "documents": manifest.document_count,
             "model": manifest.embedding_space.model,
             "storageModel": storage_model,
@@ -381,6 +381,7 @@ def _persist_chunk(
     text_sha = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()
     version_payload = {
         "externalId": chunk.external_id,
+        "vectorId": chunk.vector_id,
         "documentHash": chunk.document_hash,
         "sequence": chunk.sequence,
         "textSha256": text_sha,
@@ -411,6 +412,7 @@ def _persist_chunk(
             storage_model=storage_model,
             dimensions=manifest.embedding_space.dimensions,
             normalization=manifest.embedding_space.normalization,
+            vector_id=chunk.vector_id,
             vector_sha=vector_sha,
             original=chunk.vector_bytes,
             now=now,
@@ -461,6 +463,7 @@ def _persist_chunk(
             storage_model=storage_model,
             dimensions=manifest.embedding_space.dimensions,
             normalization=manifest.embedding_space.normalization,
+            vector_id=chunk.vector_id,
             vector_sha=vector_sha,
             original=chunk.vector_bytes,
             now=now,
@@ -475,6 +478,7 @@ def _persist_chunk(
         **chunk.metadata,
         "externalVector": {
             "externalId": chunk.external_id,
+            "vectorId": chunk.vector_id,
             "datasetId": dataset_id,
             "documentHash": chunk.document_hash,
             "chunkSequence": chunk.sequence,
@@ -527,12 +531,12 @@ def _persist_chunk(
         """
         INSERT INTO external_chunk_versions (
           dataset_id, external_id, version_hash, record_id, introduced_import_id,
-          embedding_space_id, vector_sha256, text_sha256, document_hash,
+          embedding_space_id, vector_id, vector_sha256, text_sha256, document_hash,
           chunk_sequence, character_start, character_end, total_chunks, collection,
           source_path, source_title, document_created_at, document_modified_at,
           embedded_at, source_active, is_current, metadata_json, created_at, superseded_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)
         """,
         (
             dataset_id,
@@ -541,6 +545,7 @@ def _persist_chunk(
             record_id,
             import_id,
             space_id,
+            chunk.vector_id,
             vector_sha,
             text_sha,
             chunk.document_hash,
@@ -565,6 +570,7 @@ def _persist_chunk(
         storage_model=storage_model,
         dimensions=manifest.embedding_space.dimensions,
         normalization=manifest.embedding_space.normalization,
+        vector_id=chunk.vector_id,
         vector_sha=vector_sha,
         original=chunk.vector_bytes,
         now=now,
@@ -579,6 +585,7 @@ def _store_vector(
     storage_model: str,
     dimensions: int,
     normalization: str,
+    vector_id: str,
     vector_sha: str,
     original: bytes,
     now: str,
@@ -590,15 +597,32 @@ def _store_vector(
     else:
         derived = (values / np.linalg.norm(values)).astype("<f4", copy=False).tobytes()
         transformation = "l2-normalize"
+    existing = fetch_one(
+        conn,
+        """
+        SELECT vector_sha256, original_vector, transformation
+          FROM external_vectors
+         WHERE embedding_space_id = ? AND vector_id = ?
+        """,
+        (space_id, vector_id),
+    )
+    if existing is not None and (
+        existing["vector_sha256"] != vector_sha
+        or existing["original_vector"] != original
+        or existing["transformation"] != transformation
+    ):
+        raise SnapshotConflictError(
+            f"vectorId {vector_id!r} was already imported with different bytes or normalization"
+        )
     conn.execute(
         """
         INSERT OR IGNORE INTO external_vectors (
-          embedding_space_id, vector_sha256, original_vector, derived_vector,
+          embedding_space_id, vector_id, vector_sha256, original_vector, derived_vector,
           transformation, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (space_id, vector_sha, original, derived, transformation, now),
+        (space_id, vector_id, vector_sha, original, derived, transformation, now),
     )
     conn.execute(
         """
@@ -607,7 +631,7 @@ def _store_vector(
         )
         VALUES (?, ?, ?, ?, ?)
         """,
-        (storage_model, dimensions, _vector_key(space_id, vector_sha), derived, now),
+        (storage_model, dimensions, _vector_key(space_id, vector_id), derived, now),
     )
 
 
@@ -675,8 +699,8 @@ def _embedding_space_id(bundle: ValidatedExternalBundle) -> str:
     return f"esp_{hashlib.sha256(_canonical_json(payload).encode()).hexdigest()[:32]}"
 
 
-def _vector_key(space_id: str, vector_sha: str) -> str:
-    return hashlib.sha256(f"{space_id}:{vector_sha}".encode()).hexdigest()
+def _vector_key(space_id: str, vector_id: str) -> str:
+    return hashlib.sha256(f"{space_id}:{vector_id}".encode()).hexdigest()
 
 
 def _all_records_view_id(conn: sqlite3.Connection, graph_id: str) -> str:
