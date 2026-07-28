@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from datagraph.core.ids import new_id, now_iso
+from datagraph.core.provenance import external_provenance_by_record
 from datagraph.core.records import ValidatedRecord, validate_record
 from datagraph.core.time import TimestampValidationError, parse_timestamp
 from datagraph.db import connect, fetch_all, fetch_one
@@ -101,9 +102,14 @@ async def get_record(request: Request, graph_id: str, record_id: str) -> dict[st
             """,
             (graph_id, record_id, record_id),
         )
+        provenance = (
+            external_provenance_by_record(conn, [row["id"]]).get(row["id"])
+            if row is not None
+            else None
+        )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="record not found")
-    return record_response(row)
+    return record_response(row, provenance=provenance)
 
 
 def list_records_for_graph(
@@ -117,7 +123,7 @@ def list_records_for_graph(
     extra_where: str | None = None,
     extra_params: list[object] | None = None,
 ) -> dict[str, Any]:
-    where = ["r.graph_id = ?"]
+    where = ["r.graph_id = ?", "r.is_active = 1"]
     params: list[object] = [graph_id]
     if extra_where:
         where.append(f"({extra_where})")
@@ -140,15 +146,28 @@ def list_records_for_graph(
             """,
             (*params, limit, offset),
         )
+        provenance = external_provenance_by_record(conn, [row["id"] for row in rows])
     return {
-        "records": [record_response(row, include_normalized=include_normalized) for row in rows],
+        "records": [
+            record_response(
+                row,
+                include_normalized=include_normalized,
+                provenance=provenance.get(row["id"]),
+            )
+            for row in rows
+        ],
         "total": total,
         "limit": limit,
         "offset": offset,
     }
 
 
-def record_response(row: dict, *, include_normalized: bool = True) -> dict[str, Any]:
+def record_response(
+    row: dict,
+    *,
+    include_normalized: bool = True,
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     payload = {
         "id": row["id"],
         "graphId": row["graph_id"],
@@ -169,7 +188,10 @@ def record_response(row: dict, *, include_normalized: bool = True) -> dict[str, 
         "metadata": json.loads(row["metadata_json"]) if row["metadata_json"] else None,
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
+        "active": bool(row.get("is_active", 1)),
     }
+    if provenance is not None:
+        payload["provenance"] = provenance
     if include_normalized:
         payload["normalized"] = json.loads(row["normalized_json"])
     return payload
@@ -228,7 +250,8 @@ def _upsert_valid_records(
                            timestamp_ms = ?,
                            metadata_json = ?,
                            normalized_json = ?,
-                           updated_at = ?
+                           updated_at = ?,
+                           is_active = 1
                      WHERE graph_id = ? AND record_key = ?
                     """,
                     (*values[1:], now, graph_id, record.record_key),

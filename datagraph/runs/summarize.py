@@ -320,7 +320,7 @@ def _load_record_snapshot(db_path: Path, graph_id: str) -> list[dict]:
             """
             SELECT id, record_key, normalized_json
               FROM records
-             WHERE graph_id = ?
+             WHERE graph_id = ? AND is_active = 1
              ORDER BY timestamp_ms ASC, id ASC
             """,
             (graph_id,),

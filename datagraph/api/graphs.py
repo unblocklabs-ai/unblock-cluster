@@ -99,7 +99,31 @@ async def patch_graph(request: Request, graph_id: str, body: dict[str, Any]) -> 
 @router.delete("/{graph_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_graph(request: Request, graph_id: str) -> None:
     with connect(request.app.state.settings.db_path) as conn:
+        external_space_ids = [
+            row["embedding_space_id"]
+            for row in conn.execute(
+                """
+                SELECT DISTINCT ecv.embedding_space_id
+                  FROM external_datasets ed
+                  JOIN external_chunk_versions ecv ON ecv.dataset_id = ed.id
+                 WHERE ed.graph_id = ?
+                """,
+                (graph_id,),
+            ).fetchall()
+        ]
         cursor = conn.execute("DELETE FROM graphs WHERE id = ?", (graph_id,))
+        for space_id in external_space_ids:
+            still_referenced = conn.execute(
+                "SELECT 1 FROM external_chunk_versions WHERE embedding_space_id = ? LIMIT 1",
+                (space_id,),
+            ).fetchone()
+            if still_referenced is not None:
+                continue
+            conn.execute(
+                "DELETE FROM embedding_vectors WHERE model = ?",
+                (f"external/{space_id}",),
+            )
+            conn.execute("DELETE FROM embedding_spaces WHERE id = ?", (space_id,))
         conn.commit()
     if cursor.rowcount == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="graph not found")
@@ -116,7 +140,7 @@ def _get_graph_response(db_path: str, graph_id: str) -> dict[str, Any]:
 def _graph_summary(db_path: str, row: dict, *, include_views: bool = False) -> dict[str, Any]:
     with connect(db_path) as conn:
         record_count = conn.execute(
-            "SELECT COUNT(*) FROM records WHERE graph_id = ?",
+            "SELECT COUNT(*) FROM records WHERE graph_id = ? AND is_active = 1",
             (row["id"],),
         ).fetchone()[0]
         view_rows = fetch_all(

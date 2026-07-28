@@ -24,7 +24,7 @@ def execute_layout_job(
     phase_started = _start_phase(db_path, run_id, "loading")
     phase_durations: dict[str, float] = {}
     embedding_run = _load_embedding_run(db_path, graph_id, embedding_run_id)
-    model = embedding_run["stats"]["model"]
+    model = embedding_run["stats"].get("storageModel", embedding_run["stats"]["model"])
     dimensions = int(embedding_run["stats"]["dimensions"])
     scoped_ids = _load_scoped_record_ids(db_path, graph_id, view_id)
     record_ids, matrix = load_vectors_for_records(

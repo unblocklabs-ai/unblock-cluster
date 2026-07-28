@@ -35,7 +35,7 @@ def compile_scope(scope: Any, *, alias: str = "r") -> tuple[str, list[object]]:
     for key in unknown:
         errors.append({"field": f"scope.{key}", "message": "unknown scope key"})
 
-    clauses: list[str] = []
+    clauses: list[str] = [f"{alias}.is_active = 1"]
     params: list[object] = []
 
     _add_in_clause(scope, "sourceTypes", f"{alias}.source_type", clauses, params, errors)

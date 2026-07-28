@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, Response
 
 from datagraph.api.warnings import resolved_run_warnings
 from datagraph.core.config import load_graph_config
+from datagraph.core.provenance import external_provenance_by_record
 from datagraph.db import connect, fetch_all, fetch_one
 
 router = APIRouter(prefix="/api/graphs/{graph_id}/views/{view_id}", tags=["artifact"])
@@ -113,12 +114,16 @@ def _compose_artifact(conn: Any, context: dict[str, Any]) -> dict[str, Any]:
         cluster_run_id=cluster_run_id,
     )
     topics = _topics(conn, cluster_run_id, labels, trend_snapshots)
-    data = _data_rows(conn, cluster_run_id, layout_run_id)
+    data = _data_rows(conn, cluster_run_id, layout_run_id, embedding_run_id)
 
     cluster_stats = json.loads(cluster_run["stats_json"])
     layout_params = json.loads(layout_run["params_json"]).get("layout", {})
     graph_config = load_graph_config(graph)
-    embedding_config = graph_config.get("embedding", {})
+    embedding_config = _artifact_embedding_config(
+        conn,
+        embedding_run_id,
+        graph_config.get("embedding", {}),
+    )
     run_refs = {
         "embeddingRunId": embedding_run_id,
         "clusterRunId": cluster_run_id,
@@ -133,12 +138,7 @@ def _compose_artifact(conn: Any, context: dict[str, Any]) -> dict[str, Any]:
     return {
         "graphId": graph_id,
         "viewId": view_id,
-        "config": {
-            "embedding": {
-                "model": embedding_config.get("model"),
-                "dimensions": embedding_config.get("dimensions"),
-            }
-        },
+        "config": {"embedding": embedding_config},
         "runRefs": run_refs,
         "representation": representation["representation"],
         "warnings": warnings,
@@ -258,11 +258,43 @@ def _embedding_representation(conn: Any, embedding_run_id: str | None) -> dict[s
     params = json.loads(row["params_json"])
     refs = json.loads(row["input_refs_json"])
     representation = params.get("representation", "raw")
+    if representation == "external":
+        return {"representation": "external", "summarizeRunId": None}
     if representation != "summary":
         return {"representation": "raw", "summarizeRunId": None}
     return {
         "representation": "summary",
         "summarizeRunId": params.get("summarizeRunId") or refs.get("summarizeRunId"),
+    }
+
+
+def _artifact_embedding_config(
+    conn: Any,
+    embedding_run_id: str | None,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    if embedding_run_id is None:
+        return fallback
+    row = fetch_one(
+        conn,
+        "SELECT stats_json FROM runs WHERE id = ? AND type = 'embed' AND status = 'succeeded'",
+        (embedding_run_id,),
+    )
+    if row is None:
+        return fallback
+    stats = json.loads(row["stats_json"])
+    return {
+        "model": stats.get("model", fallback.get("model")),
+        "dimensions": stats.get("dimensions", fallback.get("dimensions")),
+        **(
+            {
+                "provider": "external",
+                "fingerprint": stats.get("embeddingFingerprint"),
+                "distanceMetric": stats.get("distanceMetric"),
+            }
+            if stats.get("origin") == "external"
+            else {}
+        ),
     }
 
 
@@ -461,7 +493,12 @@ def _topics(
     return topics
 
 
-def _data_rows(conn: Any, cluster_run_id: str, layout_run_id: str) -> list[dict[str, Any]]:
+def _data_rows(
+    conn: Any,
+    cluster_run_id: str,
+    layout_run_id: str,
+    embedding_run_id: str | None,
+) -> list[dict[str, Any]]:
     rows = fetch_all(
         conn,
         """
@@ -474,6 +511,11 @@ def _data_rows(conn: Any, cluster_run_id: str, layout_run_id: str) -> list[dict[
          ORDER BY r.timestamp_ms ASC, r.id ASC
         """,
         (cluster_run_id, layout_run_id),
+    )
+    provenance = external_provenance_by_record(
+        conn,
+        [row["id"] for row in rows],
+        embedding_run_id=embedding_run_id,
     )
     return [
         {
@@ -495,6 +537,7 @@ def _data_rows(conn: Any, cluster_run_id: str, layout_run_id: str) -> list[dict[
             "clusterProbability": _round4(row["probability"]),
             "outlierScore": _round4(row["outlier_score"]),
             "isNoise": bool(row["is_noise"]),
+            **({"provenance": provenance[row["id"]]} if row["id"] in provenance else {}),
         }
         for row in rows
     ]
