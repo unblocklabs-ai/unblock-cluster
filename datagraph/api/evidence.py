@@ -13,6 +13,7 @@ from datagraph.api.facets import (
 )
 from datagraph.core.ids import new_id, now_iso
 from datagraph.core.openai_client import EmbeddingBatchResult
+from datagraph.core.provenance import external_provenance_by_record
 from datagraph.core.scope import ScopeValidationError, compile_scope
 from datagraph.core.time import TimestampValidationError, parse_timestamp
 from datagraph.core.trend_math import bucket_start, compute_trends
@@ -265,7 +266,18 @@ async def _topic_search(
     embedding_run = _resolve_embedding_run(conn, graph_id, embedding_run_id)
     embedding_params = json.loads(embedding_run["params_json"])
     embedding_config = embedding_params["embedding"]
-    dimensions = int(embedding_config.get("dimensions") or 1536)
+    embedding_stats = json.loads(embedding_run["stats_json"])
+    if embedding_config.get("provider") == "external":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "question-based evidence requires a query embedding provider proven compatible "
+                "with the imported external embedding fingerprint"
+            ),
+        )
+    dimensions = int(
+        embedding_stats.get("dimensions") or embedding_config.get("dimensions") or 1536
+    )
     provider = request.app.state.run_executor.embedding_provider(embedding_config)
     result = await provider.embed_batch([question])
     vectors = result.vectors if isinstance(result, EmbeddingBatchResult) else result
@@ -277,7 +289,9 @@ async def _topic_search(
         conn,
         cluster_run_id,
         embedding_run_id,
-        embedding_config["model"],
+        embedding_stats.get(
+            "storageModel", embedding_stats.get("model", embedding_config["model"])
+        ),
         dimensions,
         summaries,
     )
@@ -625,6 +639,17 @@ def _load_representatives(
         """,
         (cluster_run_id, cluster_id, *representative_ids),
     )
+    embedding_run_id = None
+    cluster_run = fetch_one(
+        conn, "SELECT input_refs_json FROM runs WHERE id = ?", (cluster_run_id,)
+    )
+    if cluster_run is not None:
+        embedding_run_id = json.loads(cluster_run["input_refs_json"]).get("embeddingRunId")
+    provenance = external_provenance_by_record(
+        conn,
+        representative_ids,
+        embedding_run_id=embedding_run_id,
+    )
     by_id = {row["id"]: row for row in rows}
     return [
         {
@@ -635,6 +660,7 @@ def _load_representatives(
             "customerText": row["customer_text"],
             "recordUrl": row["record_url"],
             "timestamp": row["timestamp_utc"],
+            **({"provenance": provenance[row["id"]]} if row["id"] in provenance else {}),
         }
         for row in (by_id[record_id] for record_id in representative_ids if record_id in by_id)
     ]

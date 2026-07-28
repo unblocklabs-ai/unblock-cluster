@@ -28,6 +28,23 @@ on Python 3.14.
 The demo above is fully offline. Running the real pipeline (OpenAI embeddings
 and topic labeling) requires `OPENAI_API_KEY` in the server's environment.
 
+### Import externally generated vectors
+
+External vectors can be imported without regenerating embeddings. QMD Memory Bundle v1
+is the first supported adapter:
+
+```sh
+.venv/bin/python scripts/import_vectors.py \
+  --format qmd-memory-v1 \
+  --input ./qmd-memory-bundle \
+  --dataset bill-memory
+```
+
+The command creates or updates the dataset graph and prints its succeeded external
+embedding run and `vizUrl`. It does not require QMD, network access, or an embedding API.
+See [the QMD Memory Bundle v1 contract](docs/qmd-memory-bundle-v1.md) for payload fields,
+checksums, provenance, snapshot/versioning semantics, and the upstream exporter contract.
+
 ### UI Verification
 
 The local smoke suite drives a real headless Chromium over CDP and assumes the

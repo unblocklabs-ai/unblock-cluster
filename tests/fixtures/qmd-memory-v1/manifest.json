@@ -1,0 +1,49 @@
+{
+  "checksums": {
+    "chunks.ndjson": {
+      "bytes": 5361,
+      "sha256": "cb94e4c0ef01be12d0571c3ab91483282da7e34fb67f3fa103b3456438f02e8d"
+    },
+    "vectors.f32": {
+      "bytes": 128,
+      "sha256": "32d8cb84d449b54ed44b5a290521c85a5075027c20ad13e5dfaac0e4f6379a2b"
+    }
+  },
+  "chunkCount": 8,
+  "chunking": {
+    "exporterOwned": true,
+    "strategy": "synthetic-fixed-fixture"
+  },
+  "documentCount": 4,
+  "embedding": {
+    "dimensions": 4,
+    "distanceMetric": "cosine",
+    "dtype": "float32-le",
+    "fingerprint": "sha256:qmd-synthetic-space-v1",
+    "model": "qmd-synthetic-4d",
+    "normalization": "normalized"
+  },
+  "exportId": "qmd-fixture-export-001",
+  "exportedAt": "2026-05-02T00:00:00Z",
+  "exporter": {
+    "name": "qmd-memory-exporter-fixture",
+    "version": "1.0.0"
+  },
+  "payloads": {
+    "checksums": "checksums.json",
+    "chunks": "chunks.ndjson",
+    "vectors": "vectors.f32"
+  },
+  "schema": {
+    "name": "qmd-memory-bundle",
+    "version": 1
+  },
+  "snapshot": {
+    "deletionPolicy": "tombstone-absent",
+    "mode": "full"
+  },
+  "sourceIdentity": {
+    "id": "qmd-fixture-source",
+    "label": "Synthetic QMD fixture"
+  }
+}

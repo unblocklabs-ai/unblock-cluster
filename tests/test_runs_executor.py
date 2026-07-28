@@ -27,7 +27,7 @@ def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
     initialize_database(db_path)
 
     with connect(db_path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         tables = {
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -48,6 +48,12 @@ def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
             "analysis_events",
             "record_summaries",
             "summary_items",
+            "embedding_spaces",
+            "external_datasets",
+            "external_imports",
+            "external_chunk_versions",
+            "external_import_items",
+            "external_vectors",
         } <= tables
         indexes = {
             row["name"]
@@ -59,7 +65,53 @@ def test_migrations_apply_fresh_and_are_idempotent(tmp_path: Path) -> None:
             "idx_cluster_memberships_run_cluster",
             "idx_trend_results_run_cluster",
             "idx_summary_items_run_status",
+            "idx_external_datasets_graph",
+            "idx_external_imports_dataset_exported",
+            "idx_external_chunk_current",
         } <= indexes
+        record_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(records)")
+        }
+        assert "is_active" in record_columns
+
+
+def test_external_vector_migration_upgrades_existing_v2_records_as_active(tmp_path: Path) -> None:
+    db_path = tmp_path / "upgrade" / "datagraph.sqlite3"
+    db_path.parent.mkdir(parents=True)
+    migrations = Path(__file__).parents[1] / "datagraph" / "migrations"
+    with connect(db_path) as conn:
+        conn.executescript((migrations / "001_initial.sql").read_text())
+        conn.executescript((migrations / "002_record_summaries.sql").read_text())
+        now = now_iso()
+        conn.execute(
+            "INSERT INTO graphs VALUES ('grf_existing', 'Existing', '{}', ?, ?)",
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO records (
+              id, graph_id, record_key, source_type, source_name, source_record_id,
+              title, customer_text, record_url, product, sku, rating, sentiment,
+              tags_json, timestamp_utc, timestamp_ms, metadata_json, normalized_json,
+              created_at, updated_at
+            )
+            VALUES (
+              'rec_existing', 'grf_existing', 'existing', 'note', 'fixture', 'existing',
+              NULL, 'existing text', NULL, NULL, NULL, NULL, NULL, NULL,
+              '2026-01-01T00:00:00Z', 1767225600000, NULL, '{}', ?, ?
+            )
+            """,
+            (now, now),
+        )
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+
+    initialize_database(db_path)
+    with connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute(
+            "SELECT is_active FROM records WHERE id = 'rec_existing'"
+        ).fetchone()[0] == 1
 
 
 def _client(tmp_path: Path) -> TestClient:

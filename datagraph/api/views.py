@@ -173,7 +173,7 @@ async def create_cluster_run(
     body = body or {}
     _reject_unknown_body(body, {"embeddingRunId", "cluster", "setDefault", "focus"})
     graph = _get_graph_row(request.app.state.settings.db_path, graph_id)
-    _get_view_row(request.app.state.settings.db_path, graph_id, view_id)
+    view = _get_view_row(request.app.state.settings.db_path, graph_id, view_id)
     focus = _resolve_focus(
         request.app.state.settings.db_path,
         graph_id,
@@ -194,9 +194,10 @@ async def create_cluster_run(
             ],
         )
     set_default = False if focus is not None else _set_default_from_request(body, set_default_param)
-    embedding_run_id = body.get("embeddingRunId") or _latest_succeeded_embedding_run(
-        request.app.state.settings.db_path,
-        graph_id,
+    embedding_run_id = (
+        body.get("embeddingRunId")
+        or view["default_embedding_run_id"]
+        or _latest_succeeded_embedding_run(request.app.state.settings.db_path, graph_id)
     )
     if embedding_run_id is None:
         raise HTTPException(
@@ -255,10 +256,11 @@ async def create_layout_run(
     _reject_unknown_body(body, {"embeddingRunId", "layout", "setDefault"})
     set_default = _set_default_from_request(body, set_default_param)
     graph = _get_graph_row(request.app.state.settings.db_path, graph_id)
-    _get_view_row(request.app.state.settings.db_path, graph_id, view_id)
-    embedding_run_id = body.get("embeddingRunId") or _latest_succeeded_embedding_run(
-        request.app.state.settings.db_path,
-        graph_id,
+    view = _get_view_row(request.app.state.settings.db_path, graph_id, view_id)
+    embedding_run_id = (
+        body.get("embeddingRunId")
+        or view["default_embedding_run_id"]
+        or _latest_succeeded_embedding_run(request.app.state.settings.db_path, graph_id)
     )
     if embedding_run_id is None:
         raise HTTPException(

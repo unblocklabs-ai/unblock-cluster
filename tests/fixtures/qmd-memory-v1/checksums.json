@@ -1,0 +1,17 @@
+{
+  "algorithm": "sha256",
+  "files": {
+    "chunks.ndjson": {
+      "bytes": 5361,
+      "sha256": "cb94e4c0ef01be12d0571c3ab91483282da7e34fb67f3fa103b3456438f02e8d"
+    },
+    "manifest.json": {
+      "bytes": 1171,
+      "sha256": "6f31d6a286e252dfe1b3a4506c7ba32a8186911303ef5f2c92900900accc5638"
+    },
+    "vectors.f32": {
+      "bytes": 128,
+      "sha256": "32d8cb84d449b54ed44b5a290521c85a5075027c20ad13e5dfaac0e4f6379a2b"
+    }
+  }
+}

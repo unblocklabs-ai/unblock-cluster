@@ -567,6 +567,9 @@ function renderRecordInspector(state) {
   const loading = !detailState || detailState.status === "loading";
   const failed = detailState?.status === "error";
   const recordUrl = safeRecordUrl(fullRecord.recordUrl);
+  // Prefer the artifact's run-scoped bundle identity. The full-record endpoint falls
+  // back to the import that introduced the immutable chunk version when no run is known.
+  const provenance = artifactRecord.provenance || fullRecord.provenance;
   els.emptyState.hidden = true;
   els.details.hidden = false;
   els.details.innerHTML = `
@@ -602,6 +605,7 @@ function renderRecordInspector(state) {
       <h3>Metadata</h3>
       ${formatMetadata(fullRecord.metadata)}
     </section>
+    ${renderExternalProvenance(provenance)}
   `;
   els.details
     .querySelector("[data-back-to-topic]")
@@ -609,6 +613,29 @@ function renderRecordInspector(state) {
       runtime.state = backToTopic(runtime.state);
       render({ selectionOnly: true });
     });
+}
+
+function renderExternalProvenance(provenance) {
+  if (!provenance) return "";
+  const embedding = provenance.embedding || {};
+  const bundle = provenance.bundle || {};
+  return `
+    <section class="record-section">
+      <h3>External vector provenance</h3>
+      <dl class="record-facts">
+        <dt>Stable chunk ID</dt><dd>${escapeHtml(provenance.stableChunkId || "")}</dd>
+        <dt>Collection</dt><dd>${escapeHtml(provenance.collection || "")}</dd>
+        <dt>Source path</dt><dd>${escapeHtml(provenance.path || "")}</dd>
+        <dt>Document hash</dt><dd>${escapeHtml(provenance.documentHash || "")}</dd>
+        <dt>Chunk</dt><dd>${escapeHtml(`${provenance.chunkSequence ?? ""} of ${provenance.totalChunks ?? ""}`)}</dd>
+        <dt>Character range</dt><dd>${escapeHtml(`${provenance.characterStart ?? ""}–${provenance.characterEnd ?? "unknown"}`)}</dd>
+        <dt>Embedding</dt><dd>${escapeHtml(joinParts([embedding.model, embedding.fingerprint]))}</dd>
+        <dt>Dimensions</dt><dd>${escapeHtml(formatOptionalNumber(embedding.dimensions))}</dd>
+        <dt>Export ID</dt><dd>${escapeHtml(bundle.exportId || "")}</dd>
+        <dt>Exported</dt><dd>${escapeHtml(bundle.exportedAt || "")}</dd>
+      </dl>
+    </section>
+  `;
 }
 
 function renderList(state, records) {
@@ -931,17 +958,23 @@ function renderProvenance(state) {
       <summary>Run details</summary>
       <div class="run-details-body">
         ${items.map(([label, value]) => renderRunChip(label, value)).join("")}
-        ${
-          state.artifact.representation === "summary"
-            ? `<span class="representation-pill">summary representation</span>${refs.summarizeRunId ? renderRunChip("summary", refs.summarizeRunId) : ""}`
-            : `<span class="representation-pill">raw representation</span>`
-        }
+        ${renderRepresentationPill(state.artifact.representation, refs)}
       </div>
     </details>
   `;
   els.provenance.querySelectorAll("[data-copy-run-id]").forEach((button) => {
     button.addEventListener("click", () => copyRunId(button));
   });
+}
+
+function renderRepresentationPill(representation, refs) {
+  if (representation === "summary") {
+    return `<span class="representation-pill">summary representation</span>${refs.summarizeRunId ? renderRunChip("summary", refs.summarizeRunId) : ""}`;
+  }
+  if (representation === "external") {
+    return `<span class="representation-pill">external vectors</span>`;
+  }
+  return `<span class="representation-pill">raw representation</span>`;
 }
 
 async function fetchTrendsOnce() {

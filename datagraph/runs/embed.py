@@ -238,7 +238,7 @@ def _load_raw_snapshot(
             """
             SELECT id, normalized_json
               FROM records
-             WHERE graph_id = ?
+             WHERE graph_id = ? AND is_active = 1
              ORDER BY timestamp_ms ASC, id ASC
             """,
             (graph_id,),
@@ -288,7 +288,7 @@ def _load_summary_snapshot(
                 ON rs.model = ?
                AND rs.prompt_hash = ?
                AND rs.text_hash = si.text_hash
-             WHERE r.graph_id = ?
+             WHERE r.graph_id = ? AND r.is_active = 1
              ORDER BY r.timestamp_ms ASC, r.id ASC
             """,
             (

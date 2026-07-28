@@ -87,6 +87,19 @@ async def delete_run(request: Request, graph_id: str, run_id: str) -> None:
                     "repoint defaults or delete the view first"
                 ),
             )
+        external_import = fetch_one(
+            conn,
+            "SELECT id FROM external_imports WHERE embedding_run_id = ?",
+            (run_id,),
+        )
+        if external_import is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "external embedding runs are immutable import history; "
+                    "delete the dataset graph to remove them"
+                ),
+            )
         conn.execute("DELETE FROM runs WHERE graph_id = ? AND id = ?", (graph_id, run_id))
         conn.commit()
 

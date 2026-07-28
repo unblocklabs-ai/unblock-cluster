@@ -28,7 +28,8 @@ def execute_cluster_job(
     phase_started = _start_phase(db_path, run_id, "loading")
     phase_durations: dict[str, float] = {}
     embedding_run = _load_embedding_run(db_path, graph_id, embedding_run_id)
-    model = embedding_run["stats"]["model"]
+    _validate_external_embedding_space(db_path, embedding_run_id, embedding_run)
+    model = embedding_run["stats"].get("storageModel", embedding_run["stats"]["model"])
     dimensions = int(embedding_run["stats"]["dimensions"])
     scoped_records = _load_scoped_records(db_path, graph_id, view_id, focus=focus)
     scoped_ids = [record["id"] for record in scoped_records]
@@ -167,6 +168,33 @@ def _load_embedding_run(db_path: str, graph_id: str, embedding_run_id: str) -> d
         raise RuntimeError("embeddingRunId must reference a succeeded embed run")
     row["stats"] = json.loads(row["stats_json"])
     return row
+
+
+def _validate_external_embedding_space(
+    db_path: str,
+    embedding_run_id: str,
+    embedding_run: dict[str, Any],
+) -> None:
+    stats = embedding_run["stats"]
+    if stats.get("origin") != "external":
+        return
+    expected = stats.get("embeddingSpaceId")
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ecv.embedding_space_id
+              FROM embedding_items ei
+              JOIN external_chunk_versions ecv ON ecv.record_id = ei.record_id
+             WHERE ei.run_id = ?
+            """,
+            (embedding_run_id,),
+        ).fetchall()
+    actual = {row["embedding_space_id"] for row in rows}
+    if actual != {expected}:
+        raise RuntimeError(
+            "external embedding run contains mixed or untraceable embedding spaces; "
+            "clustering requires one model and fingerprint"
+        )
 
 
 def _load_scoped_records(
