@@ -48,6 +48,28 @@ is the first supported adapter:
 
 The command creates or updates the dataset graph and prints its succeeded external
 embedding run and `vizUrl`. It does not require QMD, network access, or an embedding API.
+
+### Internal Unblock Memory analysis worker
+
+Unblock Memory can analyze its QMD index in place without importing or copying vectors.
+Configure the plugin with this checkout's relocatable worker executable:
+
+```text
+/path/to/unblock-cluster/bin/unblock-memory-analysis
+```
+
+The plugin owns and supplies its per-agent QMD SQLite path when it launches the worker;
+users and agents do not configure that database path. The worker reads each unique active
+QMD vector once and writes only the latest derived clusters, memberships, outlier scores,
+representative ranks, and 2D coordinates into the same SQLite database. It does not call
+an embedding or labeling provider.
+
+The private worker interface accepts `--db` and an optional `--config-json` object. The
+plugin may tune UMAP with `space.method`, `nComponents`, `nNeighbors`, and `minDist`; tune
+HDBSCAN with `minClusterSize`, `minSamples`, `clusterSelectionMethod`,
+`clusterSelectionEpsilon`, and `allowSingleCluster`; and set `seed`. Unknown or invalid
+properties are rejected. Cosine distance and the visualization layout remain internal.
+
 Distinct collection/path records may share one content-addressed QMD vector without
 losing either source's provenance or duplicating the binary payload.
 See [the QMD Memory Bundle v1 contract](docs/qmd-memory-bundle-v1.md) for payload fields,

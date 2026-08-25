@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHON=${UNBLOCK_CLUSTER_PYTHON:-"$REPO_ROOT/.venv/bin/python"}
+if [ ! -x "$PYTHON" ]; then
+  PYTHON=python3
+fi
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" -m datagraph.memory_analysis "$@"
