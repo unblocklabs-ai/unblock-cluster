@@ -95,6 +95,16 @@ def _create_fixture(
               PRIMARY KEY(run_id, hash, seq),
               FOREIGN KEY(run_id) REFERENCES memory_analysis_runs(id) ON DELETE CASCADE
             );
+            CREATE TABLE memory_analysis_duplicate_occurrences (
+              run_id TEXT NOT NULL,
+              content_fingerprint TEXT NOT NULL,
+              canonical_hash TEXT NOT NULL,
+              canonical_seq INTEGER NOT NULL,
+              duplicate_hash TEXT NOT NULL,
+              duplicate_seq INTEGER NOT NULL,
+              PRIMARY KEY(run_id, duplicate_hash, duplicate_seq),
+              FOREIGN KEY(run_id) REFERENCES memory_analysis_runs(id) ON DELETE CASCADE
+            );
             CREATE VIRTUAL TABLE vectors_vec USING vec0(
               hash_seq TEXT PRIMARY KEY,
               embedding float[32] distance_metric=cosine
@@ -105,12 +115,13 @@ def _create_fixture(
         for index in range(vector_count + 1):
             hash_ = f"hash-{index:03d}"
             active = int(index < vector_count)
+            content = f"memory {index}"
             vector = np.zeros(32, dtype=np.float32)
             vector[index % 2] = 1
             vector += rng.normal(0, 0.01, 32).astype(np.float32)
             conn.execute(
                 "INSERT INTO content VALUES (?, ?, ?)",
-                (hash_, f"memory {index}", "2026-08-24T00:00:00Z"),
+                (hash_, content, "2026-08-24T00:00:00Z"),
             )
             for alias in range(aliases if active else 1):
                 conn.execute(
@@ -134,9 +145,9 @@ def _create_fixture(
                 INSERT INTO content_vectors
                   (hash, seq, pos, chunk_len, model, embed_fingerprint,
                    total_chunks, embedded_at)
-                VALUES (?, 0, 0, 8, 'test-model', 'test-fingerprint', 1, ?)
+                VALUES (?, 0, 0, ?, 'test-model', 'test-fingerprint', 1, ?)
                 """,
-                (hash_, "2026-08-24T00:00:00Z"),
+                (hash_, len(content), "2026-08-24T00:00:00Z"),
             )
             conn.execute(
                 "INSERT INTO vectors_vec(hash_seq, embedding) VALUES (?, ?)",
@@ -166,6 +177,45 @@ def _insert_stale_run(conn: sqlite3.Connection) -> None:
           '2026-08-24T00:02:00Z'
         )
         """
+    )
+
+
+def _add_exact_duplicate_chunks(conn: sqlite3.Connection) -> None:
+    repeated = "repeat 🙂"
+    conn.execute(
+        "UPDATE content SET doc = ? WHERE hash = 'hash-000'",
+        (f"{repeated}\n{repeated}",),
+    )
+    conn.execute("UPDATE content SET doc = ? WHERE hash = 'hash-001'", (repeated,))
+    conn.execute(
+        """
+        UPDATE content_vectors
+        SET chunk_len = 9, total_chunks = 2
+        WHERE hash = 'hash-000'
+        """
+    )
+    conn.execute(
+        "UPDATE content_vectors SET chunk_len = 9 WHERE hash = 'hash-001'"
+    )
+    vector = bytes(
+        conn.execute(
+            "SELECT embedding FROM vectors_vec WHERE hash_seq = 'hash-000_0'"
+        ).fetchone()[0]
+    )
+    conn.execute(
+        """
+        INSERT INTO content_vectors (
+          hash, seq, pos, chunk_len, model, embed_fingerprint,
+          total_chunks, embedded_at
+        ) VALUES (
+          'hash-000', 1, 10, 9, 'test-model', 'test-fingerprint', 2,
+          '2026-08-24T00:00:00Z'
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO vectors_vec(hash_seq, embedding) VALUES ('hash-000_1', ?)",
+        (vector,),
     )
 
 
@@ -232,6 +282,95 @@ def test_missing_vectors_vec_embedding_is_rejected_before_analysis(
         _assert_previous_stale_run(conn)
 
 
+def test_population_deduplicates_exact_chunks_and_tracks_each_occurrence(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "qmd.sqlite"
+    _create_fixture(db_path, vector_count=6)
+    with _open(db_path) as conn:
+        _add_exact_duplicate_chunks(conn)
+        conn.commit()
+
+        population = memory_analysis._load_population(conn)
+
+        assert population.keys == [
+            ("hash-000", 0),
+            ("hash-002", 0),
+            ("hash-003", 0),
+            ("hash-004", 0),
+            ("hash-005", 0),
+        ]
+        assert [
+            (duplicate.canonical_key, duplicate.duplicate_key)
+            for duplicate in population.duplicate_occurrences
+        ] == [
+            (("hash-000", 0), ("hash-000", 1)),
+            (("hash-000", 0), ("hash-001", 0)),
+        ]
+        assert len({
+            duplicate.content_fingerprint
+            for duplicate in population.duplicate_occurrences
+        }) == 1
+
+        first_digest = population.digest
+        conn.execute("UPDATE documents SET active = 0 WHERE hash = 'hash-001'")
+        conn.commit()
+        changed = memory_analysis._load_population(conn)
+
+    assert changed.digest != first_digest
+    assert [
+        duplicate.duplicate_key for duplicate in changed.duplicate_occurrences
+    ] == [("hash-000", 1)]
+
+
+def test_duplicate_occurrences_are_persisted_with_the_latest_run(tmp_path: Path) -> None:
+    db_path = tmp_path / "qmd.sqlite"
+    _create_fixture(db_path, vector_count=6)
+    with _open(db_path) as conn:
+        _add_exact_duplicate_chunks(conn)
+        _insert_stale_run(conn)
+        conn.commit()
+        population = memory_analysis._load_population(conn)
+        requested, resolved = memory_analysis._parse_config_json(
+            '{"space":{"method":"none"}}'
+        )
+        config = memory_analysis._resolve_config(requested, resolved, len(population.keys))
+        analysis = memory_analysis.Analysis(
+            labels=np.zeros(len(population.keys), dtype=np.int64),
+            probabilities=np.ones(len(population.keys), dtype=np.float32),
+            outlier_scores=np.zeros(len(population.keys), dtype=np.float32),
+            points=np.zeros((len(population.keys), 2), dtype=np.float32),
+            representative_ranks={},
+        )
+
+        memory_analysis._persist(
+            conn,
+            population,
+            analysis,
+            config,
+            "current-run",
+            "2026-08-26T00:00:00+00:00",
+        )
+
+        occurrences = conn.execute(
+            """
+            SELECT run_id, canonical_hash, canonical_seq, duplicate_hash, duplicate_seq
+            FROM memory_analysis_duplicate_occurrences
+            ORDER BY duplicate_hash, duplicate_seq
+            """
+        ).fetchall()
+        assert [tuple(row) for row in occurrences] == [
+            ("current-run", "hash-000", 0, "hash-000", 1),
+            ("current-run", "hash-000", 0, "hash-001", 0),
+        ]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_analysis_runs WHERE id = 'previous-run'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_analysis_memberships"
+        ).fetchone()[0] == 5
+
+
 def test_effective_config_reaches_computation_and_representative_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -285,6 +424,7 @@ def test_effective_config_reaches_computation_and_representative_limit(
     population = memory_analysis.Population(
         keys=[(f"hash-{index}", 0) for index in range(population_size)],
         matrix=np.ones((population_size, 32), dtype=np.float32),
+        duplicate_occurrences=[],
         model="model",
         fingerprint="fingerprint",
         dimensions=32,

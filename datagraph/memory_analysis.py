@@ -49,12 +49,28 @@ MEMBERSHIP_COLUMNS = {
     "y",
     "representative_rank",
 }
+DUPLICATE_OCCURRENCE_COLUMNS = {
+    "run_id",
+    "content_fingerprint",
+    "canonical_hash",
+    "canonical_seq",
+    "duplicate_hash",
+    "duplicate_seq",
+}
+
+
+@dataclass(frozen=True)
+class DuplicateOccurrence:
+    content_fingerprint: str
+    canonical_key: tuple[str, int]
+    duplicate_key: tuple[str, int]
 
 
 @dataclass(frozen=True)
 class Population:
     keys: list[tuple[str, int]]
     matrix: np.ndarray
+    duplicate_occurrences: list[DuplicateOccurrence]
     model: str
     fingerprint: str
     dimensions: int
@@ -228,7 +244,7 @@ def _connect(db_path: Path | str) -> sqlite3.Connection:
 
 
 def _active_vector_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    required = {"documents", "content_vectors", "vectors_vec"}
+    required = {"content", "documents", "content_vectors", "vectors_vec"}
     actual = {
         row["name"]
         for row in conn.execute(
@@ -255,8 +271,10 @@ def _active_vector_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
           cv.model,
           cv.embed_fingerprint,
           cv.embedded_at,
+          c.hash AS content_hash,
           vv.embedding
         FROM active_hashes ah
+        LEFT JOIN content c ON c.hash = ah.hash
         LEFT JOIN content_vectors cv ON cv.hash = ah.hash
         LEFT JOIN vectors_vec vv ON vv.hash_seq = cv.hash || '_' || cv.seq
         ORDER BY ah.hash, cv.seq
@@ -274,6 +292,8 @@ def _active_vector_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
         if hash_rows[0]["seq"] is None:
             raise RuntimeError(f"active QMD content hash {active_hash} has no embedded chunks")
+        if hash_rows[0]["content_hash"] is None:
+            raise RuntimeError(f"active QMD content hash {active_hash} has no source content")
 
         total_chunks = {int(row["total_chunks"]) for row in hash_rows}
         if len(total_chunks) != 1 or next(iter(total_chunks)) <= 0:
@@ -324,6 +344,19 @@ def _digest_rows(rows: list[sqlite3.Row]) -> str:
     return digest.hexdigest()
 
 
+def _slice_utf16(encoded: bytes, pos: int, length: int, identity: str) -> str:
+    start = pos * 2
+    end = (pos + length) * 2
+    if pos < 0 or length <= 0 or end > len(encoded):
+        raise RuntimeError(f"active QMD content vector {identity} has invalid chunk bounds")
+    try:
+        return encoded[start:end].decode("utf-16-le")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(
+            f"active QMD content vector {identity} splits a UTF-16 surrogate pair"
+        ) from error
+
+
 def _load_population(conn: sqlite3.Connection) -> Population:
     rows = _active_vector_rows(conn)
     if not rows:
@@ -337,26 +370,55 @@ def _load_population(conn: sqlite3.Connection) -> Population:
         raise RuntimeError("active QMD vectors must have a model and embedding fingerprint")
 
     vectors: list[np.ndarray] = []
+    keys: list[tuple[str, int]] = []
+    duplicate_occurrences: list[DuplicateOccurrence] = []
+    canonical_by_fingerprint: dict[str, tuple[str, int]] = {}
+    encoded_doc = b""
+    document_hash: str | None = None
     dimensions: int | None = None
     for row in rows:
+        key = (str(row["hash"]), int(row["seq"]))
+        identity = f"{key[0]}:{key[1]}"
+        if key[0] != document_hash:
+            doc = conn.execute(
+                "SELECT doc FROM content WHERE hash = ?", (key[0],)
+            ).fetchone()
+            if doc is None:
+                raise RuntimeError(f"active QMD content hash {key[0]} has no source content")
+            encoded_doc = str(doc["doc"]).encode("utf-16-le")
+            document_hash = key[0]
         blob = bytes(row["embedding"])
         if not blob or len(blob) % np.dtype(np.float32).itemsize:
-            raise RuntimeError(f"invalid vector bytes for {row['hash']}:{row['seq']}")
+            raise RuntimeError(f"invalid vector bytes for {identity}")
         vector = np.frombuffer(blob, dtype=np.float32).copy()
         dimensions = dimensions or len(vector)
         if len(vector) != dimensions or not np.all(np.isfinite(vector)):
             raise RuntimeError("active QMD vectors have invalid or mixed dimensions")
         norm = np.linalg.norm(vector)
         if norm == 0:
-            raise RuntimeError(f"zero vector for {row['hash']}:{row['seq']}")
+            raise RuntimeError(f"zero vector for {identity}")
+
+        chunk_text = _slice_utf16(
+            encoded_doc, int(row["pos"]), int(row["chunk_len"]), identity
+        )
+        content_fingerprint = hashlib.sha256(chunk_text.encode()).hexdigest()
+        canonical_key = canonical_by_fingerprint.get(content_fingerprint)
+        if canonical_key is not None:
+            duplicate_occurrences.append(
+                DuplicateOccurrence(content_fingerprint, canonical_key, key)
+            )
+            continue
+
+        canonical_by_fingerprint[content_fingerprint] = key
+        keys.append(key)
         vectors.append((vector / norm).astype(np.float32, copy=False))
 
-    keys = [(row["hash"], int(row["seq"])) for row in rows]
     if len(keys) < 5:
-        raise RuntimeError("memory analysis requires at least 5 active embedded chunks")
+        raise RuntimeError("memory analysis requires at least 5 unique active embedded chunks")
     return Population(
         keys=keys,
         matrix=np.vstack(vectors).astype(np.float32, copy=False),
+        duplicate_occurrences=duplicate_occurrences,
         model=str(model),
         fingerprint=str(fingerprint),
         dimensions=dimensions,
@@ -417,6 +479,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
     required_tables = {
         "memory_analysis_runs",
         "memory_analysis_clusters",
+        "memory_analysis_duplicate_occurrences",
         "memory_analysis_memberships",
     }
     tables = {
@@ -432,6 +495,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
     expected = {
         "memory_analysis_runs": RUN_COLUMNS,
         "memory_analysis_clusters": CLUSTER_COLUMNS,
+        "memory_analysis_duplicate_occurrences": DUPLICATE_OCCURRENCE_COLUMNS,
         "memory_analysis_memberships": MEMBERSHIP_COLUMNS,
     }
     for table, columns in expected.items():
@@ -442,6 +506,8 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
                 f"incompatible {table} schema; missing columns: "
                 + ", ".join(missing_columns)
             )
+
+
 def _persist(
     conn: sqlite3.Connection,
     population: Population,
@@ -525,6 +591,23 @@ def _persist(
                     analysis.points,
                     strict=True,
                 )
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO memory_analysis_duplicate_occurrences (
+              run_id, content_fingerprint, canonical_hash, canonical_seq,
+              duplicate_hash, duplicate_seq
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    run_id,
+                    occurrence.content_fingerprint,
+                    *occurrence.canonical_key,
+                    *occurrence.duplicate_key,
+                )
+                for occurrence in population.duplicate_occurrences
             ],
         )
         conn.execute("DELETE FROM memory_analysis_runs WHERE id <> ?", (run_id,))

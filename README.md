@@ -59,10 +59,12 @@ Configure the plugin with this checkout's relocatable worker executable:
 ```
 
 The plugin owns and supplies its per-agent QMD SQLite path when it launches the worker;
-users and agents do not configure that database path. The worker reads each unique active
-QMD vector once and writes only the latest derived clusters, memberships, outlier scores,
-representative ranks, and 2D coordinates into the same SQLite database. It does not call
-an embedding or labeling provider.
+users and agents do not configure that database path. The worker clusters each exact active
+chunk text once, deterministically retaining the lexicographically first `(hash, seq)`
+occurrence. It writes only the latest derived clusters, memberships, exact-duplicate occurrence
+mappings, outlier scores, representative ranks, and 2D coordinates into the same SQLite
+database. QMD documents and vectors remain unchanged, and the worker does not call an
+embedding or labeling provider.
 
 The private worker interface accepts `--db` and an optional `--config-json` object. The
 plugin may tune UMAP with `space.method`, `nComponents`, `nNeighbors`, and `minDist`; tune
