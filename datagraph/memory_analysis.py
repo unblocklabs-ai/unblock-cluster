@@ -134,6 +134,23 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid numeric constant {value}")
 
 
+def _parse_collections_json(collections_json: str | None) -> tuple[str, ...] | None:
+    if collections_json is None:
+        return None
+    try:
+        parsed = json.loads(collections_json)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"--collections-json must be valid JSON: {error}") from error
+    if not isinstance(parsed, list) or not parsed:
+        raise ValueError("--collections-json must be a non-empty array")
+    if any(not isinstance(value, str) or not value.strip() for value in parsed):
+        raise ValueError("--collections-json values must be non-empty strings")
+    collections = tuple(value.strip() for value in parsed)
+    if len(set(collections)) != len(collections):
+        raise ValueError("--collections-json values must be unique")
+    return collections
+
+
 def _parse_config_json(config_json: str | None) -> tuple[dict[str, Any], dict[str, Any]]:
     if config_json is None:
         requested: dict[str, Any] = {}
@@ -243,7 +260,9 @@ def _connect(db_path: Path | str) -> sqlite3.Connection:
     return conn
 
 
-def _active_vector_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _active_vector_rows(
+    conn: sqlite3.Connection, collections: tuple[str, ...] | None = None
+) -> list[sqlite3.Row]:
     required = {"content", "documents", "content_vectors", "vectors_vec"}
     actual = {
         row["name"]
@@ -254,12 +273,18 @@ def _active_vector_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     missing = sorted(required - actual)
     if missing:
         raise RuntimeError(f"not a supported QMD index; missing tables: {', '.join(missing)}")
+    collection_filter = ""
+    parameters: tuple[str, ...] = ()
+    if collections is not None:
+        placeholders = ", ".join("?" for _ in collections)
+        collection_filter = f" AND collection IN ({placeholders})"
+        parameters = collections
     rows = conn.execute(
-        """
+        f"""
         WITH active_hashes AS (
           SELECT DISTINCT hash
           FROM documents
-          WHERE active = 1
+          WHERE active = 1{collection_filter}
         )
         SELECT
           ah.hash AS active_hash,
@@ -278,7 +303,8 @@ def _active_vector_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         LEFT JOIN content_vectors cv ON cv.hash = ah.hash
         LEFT JOIN vectors_vec vv ON vv.hash_seq = cv.hash || '_' || cv.seq
         ORDER BY ah.hash, cv.seq
-        """
+        """,
+        parameters,
     ).fetchall()
 
     validated: list[sqlite3.Row] = []
@@ -357,8 +383,10 @@ def _slice_utf16(encoded: bytes, pos: int, length: int, identity: str) -> str:
         ) from error
 
 
-def _load_population(conn: sqlite3.Connection) -> Population:
-    rows = _active_vector_rows(conn)
+def _load_population(
+    conn: sqlite3.Connection, collections: tuple[str, ...] | None = None
+) -> Population:
+    rows = _active_vector_rows(conn, collections)
     if not rows:
         raise RuntimeError("QMD index has no embedded chunks for active documents")
 
@@ -515,6 +543,7 @@ def _persist(
     config: AnalysisConfig,
     run_id: str,
     created_at: str,
+    collections: tuple[str, ...] | None = None,
 ) -> None:
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -523,6 +552,8 @@ def _persist(
             "resolved": config.resolved,
             "effective": config.effective,
         }
+        if collections is not None:
+            params["collections"] = sorted(collections)
         completed_at = datetime.now(UTC).isoformat()
         conn.execute(
             """
@@ -617,8 +648,13 @@ def _persist(
         raise
 
 
-def analyze_database(db_path: Path | str, config_json: str | None = None) -> None:
+def analyze_database(
+    db_path: Path | str,
+    config_json: str | None = None,
+    collections_json: str | None = None,
+) -> None:
     requested, resolved = _parse_config_json(config_json)
+    collections = _parse_collections_json(collections_json)
     path = Path(db_path).expanduser().resolve()
     if not path.is_file():
         raise RuntimeError(f"QMD index does not exist: {path}")
@@ -627,19 +663,20 @@ def analyze_database(db_path: Path | str, config_json: str | None = None) -> Non
     run_id = str(uuid.uuid4())
     with _connect(path) as conn:
         _validate_schema(conn)
-        population = _load_population(conn)
+        population = _load_population(conn, collections)
         config = _resolve_config(requested, resolved, len(population.keys))
         analysis = _analyze(population, config)
-        _persist(conn, population, analysis, config, run_id, created_at)
+        _persist(conn, population, analysis, config, run_id, created_at, collections)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="unblock-memory-analysis")
     parser.add_argument("--db", type=Path, required=True, help=argparse.SUPPRESS)
     parser.add_argument("--config-json", help=argparse.SUPPRESS)
+    parser.add_argument("--collections-json", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
-        analyze_database(args.db, args.config_json)
+        analyze_database(args.db, args.config_json, args.collections_json)
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as error:
         print(f"unblock-memory-analysis: {error}", file=sys.stderr)
         return 1

@@ -323,6 +323,32 @@ def test_population_deduplicates_exact_chunks_and_tracks_each_occurrence(
     ] == [("hash-000", 1)]
 
 
+def test_population_includes_only_allowed_collections_before_validation_and_deduplication(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "qmd.sqlite"
+    _create_fixture(db_path, vector_count=8)
+    with _open(db_path) as conn:
+        conn.execute(
+            "UPDATE documents SET collection = 'skills' WHERE hash IN ('hash-000', 'hash-001')"
+        )
+        conn.execute("DELETE FROM content_vectors WHERE hash = 'hash-000'")
+        conn.execute("UPDATE content SET doc = 'memory 2' WHERE hash = 'hash-001'")
+        conn.commit()
+
+        population = memory_analysis._load_population(conn, ("memory",))
+
+    assert population.keys == [
+        ("hash-002", 0),
+        ("hash-003", 0),
+        ("hash-004", 0),
+        ("hash-005", 0),
+        ("hash-006", 0),
+        ("hash-007", 0),
+    ]
+    assert population.duplicate_occurrences == []
+
+
 def test_duplicate_occurrences_are_persisted_with_the_latest_run(tmp_path: Path) -> None:
     db_path = tmp_path / "qmd.sqlite"
     _create_fixture(db_path, vector_count=6)
@@ -455,12 +481,20 @@ def _run_worker(
     db_path: Path,
     tmp_path: Path,
     config: dict[str, object] | str | None = None,
+    collections: list[str] | str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     root = Path(__file__).parents[1]
     command = [str(root / "bin/unblock-memory-analysis"), "--db", str(db_path)]
     if config is not None:
         command.extend(
             ["--config-json", config if isinstance(config, str) else json.dumps(config)]
+        )
+    if collections is not None:
+        command.extend(
+            [
+                "--collections-json",
+                collections if isinstance(collections, str) else json.dumps(collections),
+            ]
         )
     return subprocess.run(
         command,
@@ -516,7 +550,7 @@ def test_cli_analyzes_active_vectors_in_place_and_atomic_rerun(tmp_path: Path) -
         },
         "seed": 7,
     }
-    second = _run_worker(db_path, tmp_path, override)
+    second = _run_worker(db_path, tmp_path, override, ["memory"])
     assert second.returncode == 0, second.stderr
     assert second.stdout == ""
 
@@ -532,6 +566,7 @@ def test_cli_analyzes_active_vectors_in_place_and_atomic_rerun(tmp_path: Path) -
         stored_run = stored["id"]
         assert stored_run != first_run_id
         stored_params = json.loads(stored["params_json"])
+        assert stored_params["collections"] == ["memory"]
         assert stored_params["requested"] == override
         assert stored_params["resolved"] == override
         assert stored_params["effective"] == {
@@ -579,6 +614,28 @@ def test_invalid_config_fails_before_opening_database(
     tmp_path: Path, config: str, message: str
 ) -> None:
     result = _run_worker(tmp_path / "missing.sqlite", tmp_path, config)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("collections", "message"),
+    [
+        ("{", "must be valid JSON"),
+        ("{}", "must be a non-empty array"),
+        ("[]", "must be a non-empty array"),
+        ('["memory", 1]', "values must be non-empty strings"),
+        ('["memory", " "]', "values must be non-empty strings"),
+        ('["memory", "memory"]', "values must be unique"),
+    ],
+)
+def test_invalid_collection_allowlist_fails_before_opening_database(
+    tmp_path: Path, collections: str, message: str
+) -> None:
+    result = _run_worker(
+        tmp_path / "missing.sqlite", tmp_path, collections=collections
+    )
     assert result.returncode == 1
     assert result.stdout == ""
     assert message in result.stderr

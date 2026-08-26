@@ -66,8 +66,9 @@ mappings, outlier scores, representative ranks, and 2D coordinates into the same
 database. QMD documents and vectors remain unchanged, and the worker does not call an
 embedding or labeling provider.
 
-The private worker interface accepts `--db` and an optional `--config-json` object. The
-plugin may tune UMAP with `space.method`, `nComponents`, `nNeighbors`, and `minDist`; tune
+The private worker interface accepts `--db`, an optional `--config-json` object, and an
+optional `--collections-json` array of QMD collection names to analyze. The plugin may tune
+UMAP with `space.method`, `nComponents`, `nNeighbors`, and `minDist`; tune
 HDBSCAN with `minClusterSize`, `minSamples`, `clusterSelectionMethod`,
 `clusterSelectionEpsilon`, and `allowSingleCluster`; and set `seed`. Unknown or invalid
 properties are rejected. Cosine distance and the visualization layout remain internal.
