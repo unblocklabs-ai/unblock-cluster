@@ -58,6 +58,14 @@ Configure the plugin with this checkout's relocatable worker executable:
 /path/to/unblock-cluster/bin/unblock-memory-analysis
 ```
 
+For a worker-only installation, install the minimal runtime dependencies instead of the
+full Data Graph application and development stack:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-analysis.txt
+```
+
 The plugin owns and supplies its per-agent QMD SQLite path when it launches the worker;
 users and agents do not configure that database path. The worker clusters each exact active
 chunk text once, deterministically retaining the lexicographically first `(hash, seq)`
@@ -66,7 +74,7 @@ mappings, outlier scores, representative ranks, and 2D coordinates into the same
 database. QMD documents and vectors remain unchanged, and the worker does not call an
 embedding or labeling provider.
 
-The private worker interface accepts `--db`, an optional `--config-json` object, and an
+The worker interface accepts `--db`, an optional `--config-json` object, and an
 optional `--collections-json` array of QMD collection names to analyze. The plugin may tune
 UMAP with `space.method`, `nComponents`, `nNeighbors`, and `minDist`; tune
 HDBSCAN with `minClusterSize`, `minSamples`, `clusterSelectionMethod`,
